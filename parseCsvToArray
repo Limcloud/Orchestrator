@@ -1,0 +1,119 @@
+// Input:  csvFile (MimeAttachment)
+// Output: usernames (Array/string)
+
+// --- Validaciones de entrada ---
+if (!csvFile) {
+    throw "Debe subir un archivo CSV.";
+}
+
+// Validar extensión del archivo (compatible con tipos Java)
+var filename = csvFile.name ? String(csvFile.name) : "";
+if (filename && !/\.csv$/i.test(filename)) {
+    throw "El archivo debe tener extensión .csv (recibido: " + filename + ")";
+}
+
+// Usar clases Java explícitas para evitar conflictos con Rhino
+var JString = Packages.java.lang.String;
+
+// Lee el contenido del MimeAttachment en UTF-8 (con fallbacks)
+function readCsvAsString(att) {
+    // 1) byte[] -> String
+    try {
+        if (att.content) {
+            var s = new JString(att.content, "UTF-8");
+            return String(s);
+        }
+    } catch (e1) {}
+    // 2) InputStream
+    try {
+        var is = att.inputStream || (att.getInputStream ? att.getInputStream() : null);
+        if (is) {
+            var Scanner = Packages.java.util.Scanner;
+            var scan = new Scanner(is, "UTF-8").useDelimiter("\\A");
+            var text = scan.hasNext() ? scan.next() : "";
+            is.close();
+            return String(text);
+        }
+    } catch (e2) {}
+    // 3) Fallback genérico
+    try {
+        if (att.content) return String(att.content);
+    } catch (e3) {}
+    throw "No fue posible leer el contenido del archivo subido.";
+}
+
+// Limpia BOM, espacios no separables y caracteres invisibles, y trim
+function cleanLine(s) {
+    if (s == null) return "";
+    var out = String(s);
+    // Remueve BOM al inicio
+    out = out.replace(/^\uFEFF/, "");
+    // Normaliza saltos de línea se hace fuera; aquí limpiamos caracteres invisibles
+    // U+FEFF (BOM), U+200B (zero width space), U+00A0 (NBSP)
+    out = out.replace(/[\uFEFF\u200B\u00A0]/g, "");
+    return out.trim();
+}
+
+// --- Lectura y normalización ---
+var contentStr = readCsvAsString(csvFile);
+// Normaliza fin de línea
+contentStr = contentStr.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+// Archivo vacío
+if (!contentStr || !contentStr.trim()) {
+    throw "El archivo CSV está vacío.";
+}
+
+var lines = contentStr.split("\n");
+if (!lines.length) {
+    throw "El archivo CSV no contiene filas.";
+}
+
+// Buscar la primera línea no vacía como encabezado
+var headerIndex = -1;
+var headerRaw = "";
+for (var i = 0; i < lines.length; i++) {
+    var candidate = cleanLine(lines[i]);
+    if (candidate !== "") {
+        headerIndex = i;
+        headerRaw = candidate;
+        break;
+    }
+}
+if (headerIndex === -1) {
+    throw "El archivo CSV no contiene datos legibles.";
+}
+
+// Aceptar username con o sin comillas
+var headerNorm = headerRaw.replace(/^"+|"+$/g, "").toLowerCase();
+if (headerNorm !== "username") {
+    throw "Formato incorrecto. La primera línea debe ser 'username' (recibido: '" + headerRaw + "')";
+}
+
+// Parseo de filas a partir de la siguiente línea
+usernames = []; // Output
+var seen = {};
+for (var r = headerIndex + 1; r < lines.length; r++) {
+    var raw = cleanLine(lines[r]);
+    if (raw === "") continue;
+
+    // Si viene entre comillas, quitar comillas envolventes
+    if (/^".*"$/.test(raw)) {
+        raw = raw.replace(/^"+|"+$/g, "");
+        raw = cleanLine(raw);
+        if (raw === "") continue;
+    }
+
+    if (!seen[raw]) {
+        usernames.push(raw);
+        seen[raw] = true;
+    }
+}
+
+// Validar que haya datos
+if (usernames.length === 0) {
+    throw "No se encontraron usernames en el archivo CSV.";
+}
+
+System.log("Usuarios encontrados en el CSV: " + usernames.length);
+System.log("Usernames: " + usernames.join(", "));
