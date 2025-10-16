@@ -1,0 +1,92 @@
+// Inputs:  group (AD:UserGroup), validUsers (Array/AD:User)
+// Outputs: htmlBody (string)
+
+if (!group) throw "group es requerido.";
+if (!validUsers) validUsers = [];
+
+function safeAttr(u, attrName) {
+  try {
+    var v = u.getAttribute && u.getAttribute(attrName);
+    if (v != null && String(v).trim() !== "") return String(v);
+  } catch (e) {}
+  return "";
+}
+
+function userDisplay(u) {
+  // 1) displayName
+  var dn = safeAttr(u, "displayName");
+  if (dn) return dn;
+
+  // 2) givenName + sn
+  var gn = safeAttr(u, "givenName");
+  var sn = safeAttr(u, "sn");
+  var full = (gn + " " + sn).trim();
+  if (full) return full;
+
+  // 3) sAMAccountName / accountName
+  var sam = safeAttr(u, "sAMAccountName");
+  if (!sam && u.accountName) {
+    try { sam = String(u.accountName); } catch(e){}
+  }
+  if (sam) return sam;
+
+  // 4) último recurso: CN del DN
+  try {
+    if (u.dn) {
+      var m = String(u.dn).match(/CN=([^,]+)/i);
+      if (m && m[1]) return m[1];
+    }
+  } catch(e){}
+  return "Usuario";
+}
+
+// Construcción del HTML
+var groupName = group.name || safeAttr(group, "cn") || "Grupo";
+var count = validUsers.length;
+
+var rows = [];
+for (var i = 0; i < validUsers.length; i++) {
+  var label = userDisplay(validUsers[i]);
+  rows.push(
+    '<tr><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">' +
+    (i+1) +
+    '</td><td style="padding:6px 10px;border-bottom:1px solid #e5e7eb;">' +
+    label +
+    '</td></tr>'
+  );
+}
+
+var tableHtml = (rows.length > 0)
+  ? (
+    '<table role="presentation" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;">' +
+      '<thead>' +
+        '<tr style="background:#f9fafb;">' +
+          '<th align="left" style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111827;">#</th>' +
+          '<th align="left" style="padding:8px 10px;border-bottom:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#111827;">Usuario</th>' +
+        '</tr>' +
+      '</thead>' +
+      '<tbody>' + rows.join("") + '</tbody>' +
+    '</table>'
+  )
+  : '<p style="margin:16px 0 0 0;color:#374151;font-family:Arial,Helvetica,sans-serif;font-size:14px;">No hay usuarios para mostrar.</p>';
+
+var now = new Date();
+var timestamp = now.toISOString();
+
+htmlBody =
+  '<!doctype html>' +
+  '<html>' +
+    '<body style="margin:0;padding:24px;background:#ffffff;">' +
+      '<div style="max-width:680px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#111827;">' +
+        '<h2 style="margin:0 0 8px 0;font-size:18px;font-weight:600;">Resumen de miembros agregados</h2>' +
+        '<p style="margin:0 0 16px 0;font-size:14px;color:#374151;">' +
+          'Grupo: <strong>' + groupName + '</strong><br/>' +
+          'Total de usuarios: <strong>' + count + '</strong><br/>' +
+          'Generado: ' + timestamp +
+        '</p>' +
+        tableHtml +
+      '</div>' +
+    '</body>' +
+  '</html>';
+
+System.log("HTML generado para el grupo '" + groupName + "' con " + count + " usuarios.");
