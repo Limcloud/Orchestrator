@@ -1,0 +1,230 @@
+// Validar inputs
+if (!vms || vms.length === 0) {
+    throw "vms es requerido y no puede estar vacío";
+}
+
+// Validar si tenemos los tags como array de strings (opcional)
+var hasTagsArray = (vmTags && Array.isArray(vmTags));
+
+// Título del reporte (opcional)
+var reportTitle = (title && title !== "") ? title : "Reporte de Máquinas Virtuales";
+
+// Iniciar el HTML
+var htmlContent = '<!DOCTYPE html>\n';
+htmlContent += '<html lang="es">\n';
+htmlContent += '<head>\n';
+htmlContent += '    <meta charset="UTF-8">\n';
+htmlContent += '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n';
+htmlContent += '    <title>' + reportTitle + '</title>\n';
+htmlContent += '    <style>\n';
+htmlContent += '        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }\n';
+htmlContent += '        .container { max-width: 1200px; margin: 0 auto; background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n';
+htmlContent += '        h1 { color: #2c3e50; text-align: center; margin-bottom: 30px; }\n';
+htmlContent += '        .vm-card { border: 1px solid #ddd; border-radius: 8px; margin-bottom: 20px; background-color: #fafafa; }\n';
+htmlContent += '        .vm-header { background-color: #3498db; color: white; padding: 15px; border-radius: 8px 8px 0 0; }\n';
+htmlContent += '        .vm-header h2 { margin: 0; font-size: 18px; }\n';
+htmlContent += '        .vm-details { padding: 15px; }\n';
+htmlContent += '        .detail-row { display: flex; margin-bottom: 8px; }\n';
+htmlContent += '        .detail-label { font-weight: bold; min-width: 150px; color: #34495e; }\n';
+htmlContent += '        .detail-value { flex: 1; color: #2c3e50; }\n';
+htmlContent += '        .status-on { color: #27ae60; font-weight: bold; }\n';
+htmlContent += '        .status-off { color: #e74c3c; font-weight: bold; }\n';
+htmlContent += '        .summary { background-color: #ecf0f1; padding: 15px; border-radius: 8px; margin-bottom: 20px; }\n';
+htmlContent += '        .summary h3 { margin-top: 0; color: #2c3e50; }\n';
+htmlContent += '    </style>\n';
+htmlContent += '</head>\n';
+htmlContent += '<body>\n';
+htmlContent += '    <div class="container">\n';
+htmlContent += '        <h1>' + reportTitle + '</h1>\n';
+
+// Resumen general
+htmlContent += '        <div class="summary">\n';
+htmlContent += '            <h3>📊 Resumen General</h3>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Deployment Name:</span>\n';
+htmlContent += '                <span class="detail-value">' + deploymentName + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Deployment Description:</span>\n';
+htmlContent += '                <span class="detail-value">' + deploymentDescription + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Fecha de Creación:</span>\n';
+htmlContent += '                <span class="detail-value">' + createdDate + ' '+ createdAt + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Creado Por:</span>\n';
+htmlContent += '                <span class="detail-value">' + createdBy + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Deployment Status:</span>\n';
+htmlContent += '                <span class="detail-value">' + deploymentStatus + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '            <div class="detail-row">\n';
+htmlContent += '                <span class="detail-label">Fecha de reporte:</span>\n';
+htmlContent += '                <span class="detail-value">' + new Date().toLocaleString() + '</span>\n';
+htmlContent += '            </div>\n';
+htmlContent += '        </div>\n';
+
+// Generar detalles para cada VM
+System.log("Generando HTML para " + vms.length + " VMs");
+
+for (var i = 0; i < vms.length; i++) {
+    var vm = vms[i];
+    
+    try {
+        // Card de la VM
+        htmlContent += '        <div class="vm-card">\n';
+        htmlContent += '            <div class="vm-header">\n';
+        htmlContent += '                <h2>🖥️ ' + (vm.name || "VM sin nombre") + '</h2>\n';
+        htmlContent += '            </div>\n';
+        htmlContent += '            <div class="vm-details">\n';
+        
+        // Información básica
+        htmlContent += '                <div class="detail-row">\n';
+        htmlContent += '                    <span class="detail-label">Estado:</span>\n';
+        var powerState = vm.runtime && vm.runtime.powerState ? vm.runtime.powerState.value : "Desconocido";
+        var stateClass = (powerState === "poweredOn") ? "status-on" : "status-off";
+        htmlContent += '                    <span class="detail-value ' + stateClass + '">' + powerState + '</span>\n';
+        htmlContent += '                </div>\n';
+        
+        // CPU
+        if (vm.config && vm.config.hardware) {
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">CPUs:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + (vm.config.hardware.numCPU || "N/A") + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // Memoria
+        if (vm.config && vm.config.hardware) {
+            var memoryMB = vm.config.hardware.memoryMB || 0;
+            var memoryGB = Math.round(memoryMB / 1024 * 100) / 100;
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">Memoria:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + memoryGB + ' GB (' + memoryMB + ' MB)</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // Sistema Operativo
+        if (vm.config && vm.config.guestFullName) {
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">SO:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + vm.config.guestFullName + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // IP Address (si está disponible)
+        if (vm.guest && vm.guest.ipAddress) {
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">IP:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + vm.guest.ipAddress + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // Host ESXi
+        if (vm.runtime && vm.runtime.host) {
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">Host ESXi:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + vm.runtime.host.name + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // Datastore
+        if (vm.datastore && vm.datastore.length > 0) {
+            var datastores = [];
+            for (var d = 0; d < vm.datastore.length; d++) {
+                datastores.push(vm.datastore[d].name);
+            }
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">Datastores:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + datastores.join(", ") + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // UUID
+        if (vm.config && vm.config.uuid) {
+            htmlContent += '                <div class="detail-row">\n';
+            htmlContent += '                    <span class="detail-label">UUID:</span>\n';
+            htmlContent += '                    <span class="detail-value">' + vm.config.uuid + '</span>\n';
+            htmlContent += '                </div>\n';
+        }
+        
+        // Tags
+        htmlContent += '                <div class="detail-row">\n';
+        htmlContent += '                    <span class="detail-label">Tags:</span>\n';
+        htmlContent += '                    <div class="detail-value">\n';
+        
+        try {
+            // Buscar tags usando el índice de la VM en el array
+            var foundTags = [];
+            
+            if (hasTagsArray && i < vmTags.length && vmTags[i] && vmTags[i] !== "") {
+                // Parsear string de tags: "OS:Ubuntu;deployedfrom:vRA"
+                var tagPairs = vmTags[i].split(";");
+                for (var tp = 0; tp < tagPairs.length; tp++) {
+                    var pair = tagPairs[tp].split(":");
+                    if (pair.length === 2) {
+                        foundTags.push({
+                            key: pair[0],
+                            value: pair[1]
+                        });
+                    }
+                }
+            }
+            
+            // Mostrar tags encontrados
+            if (foundTags.length > 0) {
+                htmlContent += '                        <div class="tags-container">\n';
+                for (var t = 0; t < foundTags.length; t++) {
+                    var tag = foundTags[t];
+                    htmlContent += '                            <span class="tag tag-category">' + tag.key + '</span>\n';
+                    htmlContent += '                            <span class="tag">' + tag.value + '</span>\n';
+                }
+                htmlContent += '                        </div>\n';
+                System.log("Tags de deployment encontrados para " + vm.name + ": " + foundTags.length + " tags");
+            } else {
+                htmlContent += '                        <span class="no-tags">Sin tags en deployment</span>\n';
+                System.log("No se encontraron tags de deployment para VM: " + vm.name);
+            }
+            
+        } catch (tagError) {
+            System.error("Error obteniendo tags de deployment para " + vm.name + ": " + tagError);
+            htmlContent += '                        <span class="no-tags">Error obteniendo tags: ' + tagError + '</span>\n';
+        }
+        
+        htmlContent += '                    </div>\n';
+        htmlContent += '                </div>\n';
+        
+        htmlContent += '            </div>\n';
+        htmlContent += '        </div>\n';
+        
+        System.log("VM procesada: " + vm.name);
+        
+    } catch (error) {
+        System.error("Error procesando VM '" + (vm.name || "desconocida") + "': " + error);
+        
+        // Agregar card de error
+        htmlContent += '        <div class="vm-card">\n';
+        htmlContent += '            <div class="vm-header" style="background-color: #e74c3c;">\n';
+        htmlContent += '                <h2>⚠️ Error - ' + (vm.name || "VM desconocida") + '</h2>\n';
+        htmlContent += '            </div>\n';
+        htmlContent += '            <div class="vm-details">\n';
+        htmlContent += '                <div class="detail-row">\n';
+        htmlContent += '                    <span class="detail-label">Error:</span>\n';
+        htmlContent += '                    <span class="detail-value">No se pudieron obtener los detalles: ' + error + '</span>\n';
+        htmlContent += '                </div>\n';
+        htmlContent += '            </div>\n';
+        htmlContent += '        </div>\n';
+    }
+}
+
+// Cerrar HTML
+htmlContent += '    </div>\n';
+htmlContent += '</body>\n';
+htmlContent += '</html>';
+
+System.log("Reporte HTML generado exitosamente con " + vms.length + " VMs");
+
+// Output
+htmlReport = htmlContent;
