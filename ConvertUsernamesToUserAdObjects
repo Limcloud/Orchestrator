@@ -1,0 +1,167 @@
+// ============================================================================
+// INPUTS Y OUTPUTS
+// ============================================================================
+// Inputs: usernames (Array/string) - Lista de nombres de usuario a buscar
+// Outputs: users (Array/AD:User) - Usuarios encontrados en Active Directory
+//          notFound (Array/string) - Usernames que no se encontraron
+
+// Inicializar arrays de salida
+var users = [];
+var notFound = [];
+
+// Validación: Verificar que haya usernames para procesar
+if (!usernames || usernames.length === 0) {
+    throw "No hay usernames para procesar.";
+}
+
+// Constante: Dominio DN para priorizar resultados de búsqueda
+
+// ============================================================================
+// FUNCIONES HELPER (Utilidades)
+// ============================================================================
+
+/**
+ * Normaliza un string: convierte a string y elimina espacios al inicio/final
+ * @param {*} s - Valor a normalizar
+ * @return {string} - String normalizado o vacío si es null/undefined
+ */
+function norm(s) { 
+    return (s == null) ? "" : String(s).trim(); 
+}
+
+/**
+ * Convierte un string a minúsculas después de normalizarlo
+ * @param {*} s - Valor a convertir
+ * @return {string} - String en minúsculas
+ */
+function lower(s) { 
+    return norm(s).toLowerCase(); 
+}
+
+/**
+ * Obtiene el Distinguished Name (DN) de un objeto AD:User
+ * El DN es un identificador único del usuario en Active Directory
+ * Ejemplo: "CN=Juan Lopez,OU=Users,DC=vspotcr,DC=com"
+ * 
+ * @param {AD:User} userObj - Objeto de usuario de Active Directory
+ * @return {string|null} - Distinguished Name o null si no existe
+ */
+function getDN(userObj) {
+    return userObj.distinguishedName || null;
+}
+
+/**
+ * Busca un usuario en Active Directory de forma global
+ * Implementa lógica de coincidencia exacta por sAMAccountName y priorización por dominio
+ * 
+ * @param {string} username - Nombre de usuario a buscar
+ * @param {string} domainDnOpt - DN del dominio para priorizar resultados (opcional)
+ * @return {AD:User|null} - Objeto de usuario encontrado o null
+ */
+function findUserGlobal(username, domainDnOpt) {
+    var term = norm(username);
+    
+    // Buscar en Active Directory (puede retornar múltiples resultados)
+    var hits = ActiveDirectory.search("User", term);
+    
+    // Si no hay resultados, retornar null
+    if (!hits || hits.length === 0) return null;
+
+    // Array para almacenar coincidencias exactas por sAMAccountName
+    var exact = [];
+    
+    // Filtrar resultados para encontrar coincidencias exactas
+    for (var i = 0; i < hits.length; i++) {
+        var u = hits[i];
+        var sam = null;
+        
+        try {
+            // Intentar obtener sAMAccountName (nombre de cuenta de Windows)
+            sam = u.getAttribute && u.getAttribute("sAMAccountName");
+            if (!sam && u.accountName) sam = u.accountName;
+        } catch (e) {}
+        
+        // Si el sAMAccountName coincide exactamente (case-insensitive), agregarlo
+        if (sam && lower(sam) === lower(term)) {
+            exact.push(u);
+        }
+    }
+
+    // Si no hay coincidencias exactas, retornar el primer resultado encontrado
+    if (exact.length === 0) {
+        return hits[0];
+    }
+
+    // Si hay múltiples coincidencias exactas, priorizar las del dominio especificado
+    if (domainDnOpt && exact.length > 1) {
+        var suffix = "," + lower(domainDnOpt);
+        
+        // Buscar usuario cuyo DN termine con el dominio especificado
+        for (var j = 0; j < exact.length; j++) {
+            var dn = getDN(exact[j]);
+            if (dn && lower(dn).endsWith(suffix)) {
+                return exact[j];
+            }
+        }
+    }
+
+    // Si no se encontró por dominio o solo hay uno, retornar el primero
+    return exact[0];
+}
+
+// ============================================================================
+// DEDUPLICACIÓN DE USERNAMES
+// ============================================================================
+// Elimina usernames duplicados del array de entrada (case-insensitive)
+// Esto evita buscar el mismo usuario múltiples veces en AD
+
+var seenUser = {};           // Objeto para trackear usernames ya procesados
+var uniqueUsernames = [];    // Array resultante con usernames únicos
+
+for (var i = 0; i < usernames.length; i++) {
+    var u = norm(usernames[i]);           // Normalizar username
+    if (!u) continue;                      // Saltar si está vacío
+    
+    var key = lower(u);                    // Convertir a minúsculas para comparación
+    if (seenUser[key]) continue;           // Si ya lo vimos, saltar
+    
+    seenUser[key] = true;                  // Marcar como visto
+    uniqueUsernames.push(u);               // Agregar a lista única
+}
+
+// ============================================================================
+// BÚSQUEDA Y PROCESAMIENTO DE USUARIOS
+// ============================================================================
+
+var seenDN = {};  // Objeto para evitar duplicados por DN (mismo usuario, múltiples búsquedas)
+
+// Iterar sobre cada username único
+for (var k = 0; k < uniqueUsernames.length; k++) {
+    var name = uniqueUsernames[k];
+    
+    // Buscar usuario en Active Directory
+    var userObj = findUserGlobal(name, domainDn);
+
+    // Si no se encontró el usuario
+    if (!userObj) {
+        notFound.push(name);  // Agregar a lista de no encontrados
+        continue;              // Continuar con el siguiente
+    }
+
+    // Obtener el Distinguished Name del usuario encontrado
+    var userDN = getDN(userObj);
+    
+    // Agregar usuario solo si:
+    // 1. No tiene DN (caso raro, pero permitirlo) O
+    // 2. El DN no ha sido visto antes (evitar duplicados)
+    if (!userDN || !seenDN[userDN]) {
+        users.push(userObj);                    // Agregar a array de salida
+        if (userDN) seenDN[userDN] = true;     // Marcar DN como visto
+    }
+    // Si el DN ya existe, se omite silenciosamente (es un duplicado)
+}
+
+// ============================================================================
+// LOG FINAL
+// ============================================================================
+System.log("Usuarios encontrados: " + users.length + " | No encontrados: " + notFound.length);
