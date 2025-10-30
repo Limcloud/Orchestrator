@@ -1,0 +1,29 @@
+// Inputs: container (AD:OrganizationalUnit), groupName (string)
+// Output: group (AD:UserGroup)
+
+if (!groupName || !groupName.trim()) {
+  throw "El parámetro 'groupName' está vacío o no es válido.";
+}
+
+var lib = System.getModule("com.vmware.library.microsoft.activeDirectory");
+var group = lib.getUsergroupFromContainer(container, groupName);
+
+if (!group) {
+  container.createUserGroup(groupName);
+  group = lib.getUsergroupFromContainer(container, groupName);
+}
+
+// Flags AD
+var GROUPTYPE_SECURITY = 0x80000000;
+var GROUPTYPE_GLOBAL   = 0x00000002;
+
+// Convertir a Distribution (Global)
+var groupType = parseInt(group.getAttribute("groupType"), 10) || GROUPTYPE_GLOBAL;
+groupType = (groupType & ~GROUPTYPE_SECURITY) | GROUPTYPE_GLOBAL;
+group.setAttribute("groupType", String(groupType));
+
+// Ajustar sAMAccountName (máx 20 chars)
+var sam = groupName.trim().substring(0, 20);
+group.setAttribute("sAMAccountName", sam);
+
+System.log("Distribution group verificado/creado: " + group.name);
