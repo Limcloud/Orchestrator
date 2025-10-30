@@ -1,29 +1,68 @@
-// Inputs: container (AD:OrganizationalUnit), groupName (string)
+// Inputs: container (AD:OrganizationalUnit), groupName (string), dominio (string)
 // Output: group (AD:UserGroup)
 
-if (!groupName || !groupName.trim()) {
-  throw "El parámetro 'groupName' está vacío o no es válido.";
-}
+if (!groupName || !groupName.trim())  throw "El parámetro 'groupName' está vacío o no es válido.";
+if (!dominio   || !dominio.trim())    throw "El parámetro 'dominio' está vacío o no es válido (ej: empresa.com).";
 
 var lib = System.getModule("com.vmware.library.microsoft.activeDirectory");
 var group = lib.getUsergroupFromContainer(container, groupName);
-
 if (!group) {
   container.createUserGroup(groupName);
   group = lib.getUsergroupFromContainer(container, groupName);
 }
 
-// Flags AD
+// --- Convertir a Distribution (scope Global) ---
 var GROUPTYPE_SECURITY = 0x80000000;
 var GROUPTYPE_GLOBAL   = 0x00000002;
-
-// Convertir a Distribution (Global)
 var groupType = parseInt(group.getAttribute("groupType"), 10) || GROUPTYPE_GLOBAL;
 groupType = (groupType & ~GROUPTYPE_SECURITY) | GROUPTYPE_GLOBAL;
 group.setAttribute("groupType", String(groupType));
 
-// Ajustar sAMAccountName (máx 20 chars)
+// --- sAMAccountName (<= 20 chars) ---
 var sam = groupName.trim().substring(0, 20);
 group.setAttribute("sAMAccountName", sam);
 
-System.log("Distribution group verificado/creado: " + group.name);
+// --- helpers para normalizar texto ---
+function quitarAcentos(s) {
+  try {
+    var Normalizer = Packages.java.text.Normalizer;
+    var nf = Normalizer.Form.NFD;
+    var normalized = Normalizer.normalize(String(s), nf);
+    return normalized.replace(/[\u0300-\u036f]/g, "");
+  } catch (e) { return String(s); }
+}
+function normalizarLocalPart(s) {
+  s = quitarAcentos(String(s).trim().toLowerCase());
+  s = s.replace(/\s+/g, ".");         // espacios -> puntos
+  s = s.replace(/[^a-z0-9._-]/g, ""); // sólo válidos
+  s = s.replace(/\.+/g, ".");         // puntos repetidos
+  s = s.replace(/^\.+|\.+$/g, "");    // puntos extremos
+  s = s.replace(/[\u0000-\u001F]/g, ""); // quita controles
+  return s || "grupo";
+}
+
+// --- construir mail seguro ---
+var local = normalizarLocalPart(groupName);
+var dom   = String(dominio).trim();
+if (dom.charAt(0) === "@") dom = dom.substring(1);
+dom = dom.replace(/[\u0000-\u001F]/g, "");
+var mail = local + "@" + dom;
+
+// Atributo 'mail' (permitido por defecto para group)
+group.setAttribute("mail", mail);
+
+// Opcionales (solo si el esquema lo permite). En dominios sin Exchange fallan -> warn y seguimos.
+try {
+  group.setAttribute("mailNickname", local); // Exchange schema requerido
+} catch (e1) {
+  System.warn("No se pudo establecer 'mailNickname' (posible ausencia de esquema de Exchange): " + e1);
+}
+try {
+  // Multi-valor: principal en mayúsculas SMTP:, alias en smtp:
+  var proxy = ["SMTP:" + mail]; // agrega más alias si quieres: "smtp:alias@" + dom
+  group.setAttribute("proxyAddresses", proxy);
+} catch (e2) {
+  System.warn("No se pudo establecer 'proxyAddresses' (posible ausencia de esquema de Exchange): " + e2);
+}
+
+System.log("Distribution group OK: " + group.name + " | mail=" + mail);
