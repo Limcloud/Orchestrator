@@ -1,0 +1,95 @@
+// Inputs: group (AD:UserGroup), users (Array/AD:User)
+// Outputs: htmlBody (string)
+
+if (!group) throw "group es requerido.";
+if (!users) users = [];
+
+function safeAttr(u, attrName) {
+    try {
+        var v = u.getAttribute && u.getAttribute(attrName);
+        if (v != null && String(v).trim() !== "") return String(v);
+    } catch (e) {}
+    return "";
+}
+
+function userDisplay(u) {
+    // 1) displayName
+    var dn = safeAttr(u, "displayName");
+    if (dn) return dn;
+
+    // 2) givenName + sn
+    var gn = safeAttr(u, "givenName");
+    var sn = safeAttr(u, "sn");
+    var full = (gn + " " + sn).trim();
+    if (full) return full;
+
+    // 3) sAMAccountName o accountName
+    var sam = safeAttr(u, "sAMAccountName");
+    if (!sam && u.accountName) {
+        try { sam = String(u.accountName); } catch(e){}
+    }
+    if (sam) return sam;
+
+    // 4) CN del DN como último recurso
+    try {
+        if (u.dn) {
+            var m = String(u.dn).match(/CN=([^,]+)/i);
+            if (m && m[1]) return m[1];
+        }
+    } catch(e){}
+    return "Usuario";
+}
+
+var groupName = group.name || safeAttr(group, "cn") || "Grupo";
+var count = users.length;
+
+// Construir filas
+var rows = [];
+for (var i = 0; i < users.length; i++) {
+    var label = userDisplay(users[i]);
+    rows.push(
+        '<tr>' +
+            '<td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;">' + (i+1) + '</td>' +
+            '<td style="padding:8px 10px;border-bottom:1px solid #e5e7eb;">' + label + '</td>' +
+        '</tr>'
+    );
+}
+
+// Tabla con header azul moderno
+var tableHtml = (rows.length > 0)
+    ? (
+        '<table role="presentation" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;">' +
+          '<thead>' +
+            '<tr style="background:#1E3A8A;color:#ffffff;">' +
+              '<th align="left" style="padding:10px;font-family:Arial,Helvetica,sans-serif;font-size:13px;">#</th>' +
+              '<th align="left" style="padding:10px;font-family:Arial,Helvetica,sans-serif;font-size:13px;">Usuario</th>' +
+            '</tr>' +
+          '</thead>' +
+          '<tbody>' + rows.join("") + '</tbody>' +
+        '</table>'
+      )
+    : '<p style="margin:16px 0 0 0;color:#374151;font-family:Arial,Helvetica,sans-serif;font-size:14px;">No hay usuarios para mostrar.</p>';
+
+var now = new Date();
+var timestamp = now.toISOString();
+
+// HTML final
+htmlBody =
+  '<!doctype html>' +
+  '<html>' +
+    '<body style="margin:0;padding:24px;background:#ffffff;">' +
+      '<div style="max-width:680px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#111827;position:relative;">' +
+        '<img src="https://assets.gtc.com.gt/uploads/04805a41-8bac-48fa-a8bc-6a60789c9982/original/gyt-logo.png" ' +
+        'style="position:absolute; top:0; right:0; width:120px; height:auto;" alt="Logo"/>' +
+        '<h2 style="margin:0 0 8px 0;font-size:18px;font-weight:600;">Resumen de miembros agregados</h2>' +
+        '<p style="margin:0 0 16px 0;font-size:14px;color:#374151;">' +
+          'Grupo: <strong>' + groupName + '</strong><br/>' +
+          'Total de usuarios: <strong>' + count + '</strong><br/>' +
+          'Generado: ' + timestamp +
+        '</p>' +
+        tableHtml +
+      '</div>' +
+    '</body>' +
+  '</html>';
+
+System.log("HTML generado para el grupo '" + groupName + "' con " + count + " usuarios.");
