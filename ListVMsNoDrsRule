@@ -24,64 +24,71 @@ function Handler($context, $inputs) {
             Write-Host "------------------------------"
             Write-Host "[INFO] Cluster: $($cluster.Name)"
 
-            $ccr = Get-View -Id $cluster.ExtensionData.MoRef -Property Name, ConfigurationEx
+            try {
+                $ccr = Get-View -Id $cluster.ExtensionData.MoRef -Property Name, ConfigurationEx
 
-            if ($ccr -eq $null -or $ccr.ConfigurationEx -eq $null) {
-                Write-Host "[WARN] Cluster $($cluster.Name) sin ConfigurationEx, saltando..."
+                if ($ccr -eq $null -or $ccr.ConfigurationEx -eq $null) {
+                    Write-Host "[WARN] Cluster $($cluster.Name) sin ConfigurationEx, saltando..."
+                    continue
+                }
+
+                # 1) Construir mapa de VM Groups
+                $vmGroupMap = @{}
+                foreach ($g in @($ccr.ConfigurationEx.Group)) {
+                    if ($g.GetType().Name -eq "ClusterVmGroup") {
+                        $set = New-Object System.Collections.Generic.HashSet[string]
+                        foreach ($vmMoRef in @($g.Vm)) {
+                            if ($vmMoRef -and $vmMoRef.Value) { [void]$set.Add($vmMoRef.Value) }
+                        }
+                        $vmGroupMap[$g.Name] = $set
+                    }
+                }
+                Write-Host "[INFO] VM Groups (from API): $($vmGroupMap.Keys.Count)"
+
+                # 2) Resolver reglas reales del cluster
+                $covered = New-Object System.Collections.Generic.HashSet[string]
+                foreach ($r in @($ccr.ConfigurationEx.Rule)) {
+                    if ($r.GetType().Name -match "AffinityRuleSpec") {
+                        foreach ($vmMoRef in @($r.Vm)) {
+                            if ($vmMoRef -and $vmMoRef.Value) { [void]$covered.Add($vmMoRef.Value) }
+                        }
+                        continue
+                    }
+                    if ($r.GetType().Name -eq "ClusterVmHostRuleInfo") {
+                        $gName = $r.VmGroupName
+                        if ($gName -and $vmGroupMap.ContainsKey($gName)) {
+                            foreach ($vmId in $vmGroupMap[$gName]) { [void]$covered.Add($vmId) }
+                        }
+                        continue
+                    }
+                }
+                Write-Host "[INFO] VMs covered by any rule (from API): $($covered.Count)"
+
+                # 3) Evaluar VMs del cluster
+                $vms = Get-VM -Location $cluster
+                Write-Host "[INFO] VMs in cluster: $($vms.Count)"
+
+                $scanned = 0
+                $without = 0
+
+                foreach ($vm in $vms) {
+                    $scanned++
+                    if ($vm.Name -like "vCLS-*") { continue }
+                    $vmId = $vm.ExtensionData.MoRef.Value
+                    if (-not $covered.Contains($vmId)) {
+                        $without++
+                        $line = "$vCenter | $($cluster.Name) | $($vm.Name)"
+                        $output += $line
+                        Write-Host "[INFO] VM without DRS rule: $line"
+                    }
+                }
+                Write-Host "[INFO] Cluster done: $($cluster.Name) | Scanned=$scanned | WithoutRule=$without"
+
+            }
+            catch {
+                Write-Host "[WARN] Error en cluster $($cluster.Name): $($_.Exception.Message), saltando..."
                 continue
             }
-
-            # 1) Construir mapa de VM Groups
-            $vmGroupMap = @{}
-            foreach ($g in @($ccr.ConfigurationEx.Group)) {
-                if ($g.GetType().Name -eq "ClusterVmGroup") {
-                    $set = New-Object System.Collections.Generic.HashSet[string]
-                    foreach ($vmMoRef in @($g.Vm)) {
-                        if ($vmMoRef -and $vmMoRef.Value) { [void]$set.Add($vmMoRef.Value) }
-                    }
-                    $vmGroupMap[$g.Name] = $set
-                }
-            }
-            Write-Host "[INFO] VM Groups (from API): $($vmGroupMap.Keys.Count)"
-
-            # 2) Resolver reglas reales del cluster
-            $covered = New-Object System.Collections.Generic.HashSet[string]
-            foreach ($r in @($ccr.ConfigurationEx.Rule)) {
-                if ($r.GetType().Name -match "AffinityRuleSpec") {
-                    foreach ($vmMoRef in @($r.Vm)) {
-                        if ($vmMoRef -and $vmMoRef.Value) { [void]$covered.Add($vmMoRef.Value) }
-                    }
-                    continue
-                }
-                if ($r.GetType().Name -eq "ClusterVmHostRuleInfo") {
-                    $gName = $r.VmGroupName
-                    if ($gName -and $vmGroupMap.ContainsKey($gName)) {
-                        foreach ($vmId in $vmGroupMap[$gName]) { [void]$covered.Add($vmId) }
-                    }
-                    continue
-                }
-            }
-            Write-Host "[INFO] VMs covered by any rule (from API): $($covered.Count)"
-
-            # 3) Evaluar VMs del cluster
-            $vms = Get-VM -Location $cluster
-            Write-Host "[INFO] VMs in cluster: $($vms.Count)"
-
-            $scanned = 0
-            $without = 0
-
-            foreach ($vm in $vms) {
-                $scanned++
-                if ($vm.Name -like "vCLS-*") { continue }
-                $vmId = $vm.ExtensionData.MoRef.Value
-                if (-not $covered.Contains($vmId)) {
-                    $without++
-                    $line = "$vCenter | $($cluster.Name) | $($vm.Name)"
-                    $output += $line
-                    Write-Host "[INFO] VM without DRS rule: $line"
-                }
-            }
-            Write-Host "[INFO] Cluster done: $($cluster.Name) | Scanned=$scanned | WithoutRule=$without"
         }
     }
     catch {
