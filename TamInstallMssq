@@ -1,0 +1,128 @@
+function Handler($context, $inputs) {
+
+    $ErrorActionPreference = "Stop"
+
+    #
+    # vCenter
+    #
+
+    $vCenter = "vcsa-p-01.vspotcr.com"
+    $vCenterUser = "administrator@vsphere.local"
+    $vCenterPassword = "Vspotcr1!"
+
+    #
+    # Guest
+    #
+
+    $vmName = $inputs.VMName
+    $guestUser = "Administrator"
+    $guestPassword = "Vspotcr1!"
+
+    Set-PowerCLIConfiguration `
+        -InvalidCertificateAction Ignore `
+        -Confirm:$false | Out-Null
+
+    Write-Host "Connecting to vCenter..."
+
+    Connect-VIServer `
+        -Server $vCenter `
+        -User $vCenterUser `
+        -Password $vCenterPassword | Out-Null
+
+    try {
+
+        $vm = Get-VM -Name $vmName -ErrorAction Stop
+
+        if ($vm.PowerState -ne "PoweredOn") {
+            throw "VM is not powered on."
+        }
+
+        Write-Host "Executing deployment script..."
+
+        $script = @'
+
+$ErrorActionPreference="Stop"
+
+$Repo="\\SQLREPO\Software\SQL2022"
+
+$Local="C:\Temp\SQLDemo"
+
+if(Test-Path $Local){
+    Remove-Item $Local -Recurse -Force
+}
+
+New-Item -ItemType Directory -Path $Local -Force | Out-Null
+
+#
+# Connect to repository
+#
+
+cmd /c "net use \\SQLREPO /delete /y" | Out-Null
+
+cmd /c "net use \\SQLREPO /user:SQLREPO\Administrator Vspotcr1!" | Out-Null
+
+#
+# Copy files
+#
+
+Copy-Item "$Repo\*" $Local -Recurse -Force
+
+#
+# Execute installer
+#
+
+powershell.exe -ExecutionPolicy Bypass `
+    -File "$Local\Install-SQL2022.ps1"
+
+#
+# Return result
+#
+
+$resultFile="$Local\Install-SQL2022.result"
+
+if(Test-Path $resultFile){
+
+    Get-Content $resultFile
+
+}
+else{
+
+    Write-Output "RESULT=FAILED"
+    Write-Output "Install-SQL2022.result not found."
+
+}
+
+'@
+
+        $result = Invoke-VMScript `
+            -VM $vm `
+            -GuestUser $guestUser `
+            -GuestPassword $guestPassword `
+            -ScriptType Powershell `
+            -ScriptText $script `
+            -ToolsWaitSecs 1800 `
+            -ErrorAction Stop
+
+        Write-Host ""
+        Write-Host "========== Guest Output =========="
+        Write-Host $result.ScriptOutput
+        Write-Host "=================================="
+
+        if ($result.ScriptOutput -match "RESULT=SUCCESS") {
+
+            return $result.ScriptOutput
+
+        }
+
+        throw "Installation failed.`n`n$($result.ScriptOutput)"
+
+    }
+    finally {
+
+        Disconnect-VIServer `
+            -Server $vCenter `
+            -Confirm:$false
+
+    }
+
+}
