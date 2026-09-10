@@ -43,7 +43,7 @@ function Handler($context, $inputs) {
 
 $ErrorActionPreference="Stop"
 
-$Repo="\\SQLREPO\Software\SQL2022"
+$Repo="\\SQLREPO\Software\SQL2025"
 
 $Local="C:\Temp\SQLDemo"
 
@@ -72,13 +72,13 @@ Copy-Item "$Repo\*" $Local -Recurse -Force
 #
 
 powershell.exe -ExecutionPolicy Bypass `
-    -File "$Local\Install-SQL2022.ps1"
+    -File "$Local\Install-SQL2025.ps1"
 
 #
 # Return result
 #
 
-$resultFile="$Local\Install-SQL2022.result"
+$resultFile="$Local\Install-SQL2025.result"
 
 if(Test-Path $resultFile){
 
@@ -88,7 +88,7 @@ if(Test-Path $resultFile){
 else{
 
     Write-Output "RESULT=FAILED"
-    Write-Output "Install-SQL2022.result not found."
+    Write-Output "Install-SQL2025.result not found."
 
 }
 
