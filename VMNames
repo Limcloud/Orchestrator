@@ -1,0 +1,31 @@
+#GTC VM Names
+
+[
+  {"name":"ALTON","inUse":false},
+  {"name":"AMES","inUse":false},
+  {"name":"ANDOVER","inUse":false},
+  {"name":"ANSON","inUse":false},
+  {"name":"ARDENTOWN","inUse":false},
+  {"name":"ARDMORE","inUse":false},
+  {"name":"ASHBORO","inUse":false},
+  {"name":"ASTORIA","inUse":false},
+  {"name":"ATOKA","inUse":false},
+  {"name":"AUBREY","inUse":false},
+  {"name":"BANGOR","inUse":false},
+  {"name":"BAXTER","inUse":false},
+  {"name":"BEDFORD","inUse":false},
+  {"name":"BELLEVUE","inUse":false},
+  {"name":"BEMIDJI","inUse":false},
+  {"name":"BEREA","inUse":false},
+  {"name":"BISBEE","inUse":false},
+  {"name":"BOLIVAR","inUse":false},
+  {"name":"BOWIE","inUse":false},
+  {"name":"BRASELTON","inUse":false},
+  {"name":"BREVARD","inUse":false},
+  {"name":"BRISTOW","inUse":false},
+  {"name":"BROKENBOW","inUse":false},
+  {"name":"BUFFALO","inUse":false},
+  {"name":"BUTTE","inUse":false},
+  {"name":"ELCAIRO","inUse":false},
+  {"name":"KILGORE","inUse":false}
+]
