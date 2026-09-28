@@ -29,3 +29,43 @@
   {"name":"ELCAIRO","inUse":false},
   {"name":"KILGORE","inUse":false}
 ]
+
+
+
+var attribute = config.getAttributeWithKey("listado");
+
+if (!attribute || !attribute.value) {
+    throw "El Configuration Element GTC-VMs-NOMBRES no contiene el atributo listado o está vacío.";
+}
+
+var entries;
+
+try {
+    entries = JSON.parse(attribute.value);
+} catch (e) {
+    throw "El atributo listado no contiene JSON válido: " + e;
+}
+
+if (!Array.isArray(entries)) {
+    throw "El atributo listado debe contener un arreglo entre corchetes [ ].";
+}
+
+var availableNames = [];
+
+for (var i = 0; i < entries.length; i++) {
+    var entry = entries[i];
+
+    if (!entry ||
+        typeof entry.name !== "string" ||
+        entry.name.trim() === "" ||
+        typeof entry.inUse !== "boolean") {
+        throw "Registro inválido en la posición " + i +
+              ". Cada registro requiere name (texto) e inUse (booleano).";
+    }
+
+    if (entry.inUse === false) {
+        availableNames.push(entry.name);
+    }
+}
+
+return availableNames;
