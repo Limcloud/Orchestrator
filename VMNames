@@ -30,7 +30,7 @@
   {"name":"KILGORE","inUse":false}
 ]
 
-
+##Funcion  consultar nombres de VMs disponibles.
 
 var category = Server.getConfigurationElementCategoryWithPath("web-root");
 
@@ -89,3 +89,106 @@ for (var j = 0; j < entries.length; j++) {
 }
 
 return availableNames;
+
+##Funcion  para reservar nombres de VMs.
+
+if (typeof cantidad !== "number" ||
+    !isFinite(cantidad) ||
+    cantidad < 1 ||
+    Math.floor(cantidad) !== cantidad) {
+    throw "cantidad debe ser un número entero mayor que cero.";
+}
+
+var lockId = "GTC-VMs-NOMBRES/listado";
+var lockOwner = "reserva-" + new Date().getTime() + "-" + Math.random();
+
+LockingSystem.lockAndWait(lockId, lockOwner);
+
+try {
+    // Buscar la configuración DESPUÉS de adquirir el bloqueo.
+    var category = Server.getConfigurationElementCategoryWithPath("web-root");
+
+    if (!category) {
+        throw "No se encontró la carpeta de configuraciones web-root.";
+    }
+
+    var config = null;
+    var elements = category.configurationElements;
+
+    for (var i = 0; i < elements.length; i++) {
+        if (elements[i].name === "GTC-VMs-NOMBRES") {
+            config = elements[i];
+            break;
+        }
+    }
+
+    if (!config) {
+        throw "No se encontró GTC-VMs-NOMBRES en web-root.";
+    }
+
+    var attribute = config.getAttributeWithKey("listado");
+
+    if (!attribute || !attribute.value) {
+        throw "El atributo listado no existe o está vacío.";
+    }
+
+    var entries;
+
+    try {
+        entries = JSON.parse(attribute.value);
+    } catch (e) {
+        throw "El atributo listado no contiene JSON válido: " + e;
+    }
+
+    if (!Array.isArray(entries)) {
+        throw "El atributo listado debe contener un arreglo entre [ ].";
+    }
+
+    var availableIndexes = [];
+    var seenNames = {};
+
+    for (var j = 0; j < entries.length; j++) {
+        var entry = entries[j];
+
+        if (!entry ||
+            typeof entry.name !== "string" ||
+            entry.name.trim() === "" ||
+            typeof entry.inUse !== "boolean") {
+            throw "Registro inválido en la posición " + j + ".";
+        }
+
+        if (seenNames[entry.name]) {
+            throw "Nombre duplicado en el listado: " + entry.name;
+        }
+        seenNames[entry.name] = true;
+
+        if (entry.inUse === false) {
+            availableIndexes.push(j);
+        }
+    }
+
+    // No cambiar nada si no alcanza para todas las VMs.
+    if (availableIndexes.length < cantidad) {
+        throw "Se solicitaron " + cantidad + " nombres, pero solo hay " +
+              availableIndexes.length + " disponibles.";
+    }
+
+    var reservedNames = [];
+
+    for (var k = 0; k < cantidad; k++) {
+        var index = availableIndexes[k];
+        entries[index].inUse = true;
+        reservedNames.push(entries[index].name);
+    }
+
+    config.setAttributeWithKey("listado", JSON.stringify(entries));
+
+    System.log("Nombres reservados: " + reservedNames.join(", "));
+    return reservedNames;
+
+} finally {
+    LockingSystem.unlock(lockId, lockOwner);
+}
+
+
+
