@@ -190,5 +190,16 @@ try {
     LockingSystem.unlock(lockId, lockOwner);
 }
 
+##Leer Input Properties
 
+var currentNames = inputProperties.get("resourceNames");
+
+if (!currentNames || currentNames.length < 1) {
+    throw "El evento Compute allocation no contiene resourceNames.";
+}
+
+var cantidad = currentNames.length;
+
+System.log("Cantidad de máquinas del evento: " + cantidad);
+System.log("Nombres recibidos: " + currentNames.join(", "));
 
