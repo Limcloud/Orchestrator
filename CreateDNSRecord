@@ -1,1 +1,157 @@
+function Handler($context, $inputs) {
+    $ErrorActionPreference = 'Stop'
+    $connection = $null
+    $stage = 'Validar configuración'
 
+    try {
+        foreach ($name in @(
+            'vCenter',
+            'vCenterUsername',
+            'vCenterPassword',
+            'executionVmName',
+            'guestUsername',
+            'guestPassword'
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$inputs[$name])) {
+                throw "Falta configurar el parámetro: $name"
+            }
+        }
+
+        $stage = 'Conectar a vCenter'
+        Write-Host "Etapa: $stage"
+
+        $connection = Connect-VIServer `
+            -Server $inputs.vCenter `
+            -User $inputs.vCenterUsername `
+            -Password $inputs.vCenterPassword `
+            -NotDefault `
+            -ErrorAction Stop
+
+        $stage = 'Localizar VM'
+        Write-Host "Etapa: $stage"
+
+        $vmName = [string]$inputs.executionVmName
+        $vms = @(
+            Get-VM -Server $connection -Name $vmName -ErrorAction Stop |
+                Where-Object { $_.Name -eq $vmName }
+        )
+
+        if ($vms.Count -ne 1) {
+            throw "Se esperaba una única VM con nombre '$vmName'; encontradas: $($vms.Count)."
+        }
+
+        $vm = $vms[0]
+
+        if ($vm.PowerState -ne 'PoweredOn') {
+            throw "La VM '$vmName' no está encendida."
+        }
+
+        # Este bloque se ejecuta dentro de Windows.
+        $guestScript = @'
+$ErrorActionPreference = 'Stop'
+$testFile = $null
+
+try {
+    $computerName = $env:COMPUTERNAME
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+    $testFile = Join-Path $env:TEMP (
+        'vro-execution-test-' + [guid]::NewGuid().ToString() + '.txt'
+    )
+
+    $expectedContent = 'Prueba de ejecucion remota desde Orchestrator'
+
+    Set-Content -LiteralPath $testFile -Value $expectedContent -Encoding UTF8
+
+    $actualContent = Get-Content -LiteralPath $testFile -Raw
+
+    if ($actualContent.TrimEnd() -ne $expectedContent) {
+        throw 'El contenido leído no coincide con el contenido escrito.'
+    }
+
+    Remove-Item -LiteralPath $testFile -Force
+
+    if (Test-Path -LiteralPath $testFile) {
+        throw 'No fue posible eliminar el archivo de prueba.'
+    }
+
+    [ordered]@{
+        success      = $true
+        computerName = $computerName
+        executedAs   = $identity
+        filePath     = $testFile
+        fileCreated  = $true
+        fileRead     = $true
+        fileDeleted  = $true
+    } | ConvertTo-Json -Compress
+
+    exit 0
+}
+catch {
+    $failureMessage = $_.Exception.Message
+
+    if ($testFile -and (Test-Path -LiteralPath $testFile)) {
+        Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
+    }
+
+    [ordered]@{
+        success      = $false
+        computerName = $env:COMPUTERNAME
+        error        = $failureMessage
+    } | ConvertTo-Json -Compress
+
+    exit 1
+}
+'@
+
+        $stage = 'Ejecutar PowerShell mediante VMware Tools'
+        Write-Host "Etapa: $stage"
+
+        $result = Invoke-VMScript `
+            -Server $connection `
+            -VM $vm `
+            -ScriptType PowerShell `
+            -ScriptText $guestScript `
+            -GuestUser $inputs.guestUsername `
+            -GuestPassword $inputs.guestPassword `
+            -ToolsWaitSecs 60 `
+            -ErrorAction Stop
+
+        $stage = 'Validar resultado'
+        $scriptOutput = ([string]$result.ScriptOutput).Trim()
+
+        if ($result.ExitCode -ne 0) {
+            throw "El script remoto terminó con código $($result.ExitCode). $scriptOutput"
+        }
+
+        $parsedResult = $scriptOutput | ConvertFrom-Json -ErrorAction Stop
+
+        if ($parsedResult.success -ne $true) {
+            throw "La prueba remota no reportó éxito. $scriptOutput"
+        }
+
+        Write-Host "Prueba completada. Equipo: $($parsedResult.computerName)"
+        Write-Host "Ejecutado como: $($parsedResult.executedAs)"
+        Write-Host "Archivo creado, leído y eliminado correctamente."
+
+        return @{
+            executionResult = $scriptOutput
+        }
+    }
+    catch {
+        throw "Falló la etapa '$stage': $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $connection) {
+            try {
+                Disconnect-VIServer `
+                    -Server $connection `
+                    -Confirm:$false `
+                    -ErrorAction Stop | Out-Null
+            }
+            catch {
+                Write-Warning 'No fue posible cerrar la conexión a vCenter.'
+            }
+        }
+    }
+}
