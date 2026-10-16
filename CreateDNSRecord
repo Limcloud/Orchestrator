@@ -26,7 +26,7 @@ function Handler($context, $inputs) {
 
         $parametersJson = @{
             dnsServer  = ([string]$settings.dnsServer).Trim()
-            zoneName   = ([string]$settings.zoneName).Trim().TrimEnd('.')
+            zoneName   = ([string]$settings.zoneName).Trim().TrimEnd('.').ToLowerInvariant()
             recordName = ([string]$settings.recordName).Trim().ToLowerInvariant()
             ipAddress  = ([string]$settings.ipAddress).Trim()
         } | ConvertTo-Json -Compress
@@ -35,12 +35,17 @@ function Handler($context, $inputs) {
             [Text.Encoding]::UTF8.GetBytes($parametersJson)
         )
 
-        # Código que se ejecutará dentro de Windows.
+        # Script ejecutado dentro de Windows mediante VMware Tools.
         $guestScript = @'
 $ErrorActionPreference = 'Stop'
 $stage = 'Validar parámetros'
-$created = $false
+$aCreated = $false
+$ptrCreated = $false
 $exitCode = 0
+
+function Normalize-DnsName([string]$name) {
+    return $name.Trim().TrimEnd('.').ToLowerInvariant()
+}
 
 try {
     $json = [Text.Encoding]::UTF8.GetString(
@@ -58,120 +63,195 @@ try {
         throw 'recordName debe ser un hostname de 1 a 63 caracteres, sin dominio y con guiones solo en el interior.'
     }
 
-    if ([string]::IsNullOrWhiteSpace($dnsServer)) {
-        throw 'dnsServer está vacío.'
-    }
-
-    if ([string]::IsNullOrWhiteSpace($zoneName)) {
-        throw 'zoneName está vacío.'
+    if ([string]::IsNullOrWhiteSpace($dnsServer) -or
+        [string]::IsNullOrWhiteSpace($zoneName)) {
+        throw 'dnsServer y zoneName son obligatorios.'
     }
 
     if ($ipAddress -notmatch '^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$') {
         throw 'ipAddress debe ser una IPv4 con cuatro octetos decimales.'
     }
 
-    foreach ($octet in $ipAddress.Split('.')) {
+    $octets = $ipAddress.Split('.')
+    foreach ($octet in $octets) {
         if ([int]$octet -gt 255) {
             throw 'ipAddress contiene un octeto mayor que 255.'
         }
     }
 
     $fqdn = "$recordName.$zoneName"
+    $ptrTarget = "$fqdn."
+    $reverseZoneName = "$($octets[2]).$($octets[1]).$($octets[0]).in-addr.arpa"
+    $reverseRecordName = $octets[3]
 
     $stage = 'Cargar módulo DnsServer'
     Import-Module DnsServer -ErrorAction Stop
 
-    $stage = 'Consultar zona DNS'
-    $zone = Get-DnsServerZone -ComputerName $dnsServer -Name $zoneName -ErrorAction Stop
+    $stage = 'Consultar zonas DNS'
 
-    if ($null -eq $zone) {
-        throw "La zona '$zoneName' no fue encontrada."
+    # Si la consulta falla, conservar el error de acceso/conectividad.
+    $zones = @(Get-DnsServerZone -ComputerName $dnsServer -ErrorAction Stop)
+
+    $forwardZones = @(
+        $zones | Where-Object { $_.ZoneName -eq $zoneName }
+    )
+    $reverseZones = @(
+        $zones | Where-Object { $_.ZoneName -eq $reverseZoneName }
+    )
+
+    if ($forwardZones.Count -eq 0) {
+        throw "La zona directa '$zoneName' no aparece en las zonas devueltas por '$dnsServer'. No se crearon registros."
     }
 
-    if ($zone.IsReverseLookupZone) {
-        throw "La zona '$zoneName' es reversa."
+    if ($reverseZones.Count -eq 0) {
+        throw "La zona reversa '$reverseZoneName' no aparece en las zonas devueltas por '$dnsServer'. Debe existir antes de ejecutar este workflow. No se crearon registros."
+    }
+
+    if ($forwardZones[0].IsReverseLookupZone) {
+        throw "La zona '$zoneName' no es una zona directa."
+    }
+
+    if (-not $reverseZones[0].IsReverseLookupZone) {
+        throw "La zona '$reverseZoneName' no es una zona reversa."
     }
 
     $stage = 'Comprobar registros existentes'
 
-    # No ocultar errores de acceso o conectividad.
-    $records = @(
+    # Consultas sin SilentlyContinue para no confundir errores con ausencia.
+    $forwardRecords = @(
         Get-DnsServerResourceRecord -ComputerName $dnsServer -ZoneName $zoneName -ErrorAction Stop |
             Where-Object { $_.HostName -eq $recordName }
     )
 
-    $cnames = @($records | Where-Object { $_.RecordType -eq 'CNAME' })
-    if ($cnames.Count -gt 0) {
+    $reverseRecords = @(
+        Get-DnsServerResourceRecord -ComputerName $dnsServer -ZoneName $reverseZoneName -ErrorAction Stop |
+            Where-Object { $_.HostName -eq $reverseRecordName }
+    )
+
+    $forwardCnames = @(
+        $forwardRecords | Where-Object { $_.RecordType -eq 'CNAME' }
+    )
+    $reverseCnames = @(
+        $reverseRecords | Where-Object { $_.RecordType -eq 'CNAME' }
+    )
+
+    if ($forwardCnames.Count -gt 0) {
         throw "Conflicto: '$fqdn' ya tiene un CNAME."
     }
 
+    if ($reverseCnames.Count -gt 0) {
+        throw "Conflicto: '$reverseRecordName.$reverseZoneName' tiene un CNAME. Esta acción espera una zona reversa /24 sin delegación mediante CNAME."
+    }
+
     $existingIps = @(
-        $records |
+        $forwardRecords |
             Where-Object { $_.RecordType -eq 'A' } |
             ForEach-Object { $_.RecordData.IPv4Address.ToString() }
     )
 
+    $existingTargets = @(
+        $reverseRecords |
+            Where-Object { $_.RecordType -eq 'PTR' } |
+            ForEach-Object { Normalize-DnsName $_.RecordData.PtrDomainName }
+    )
+
     $differentIps = @($existingIps | Where-Object { $_ -ne $ipAddress })
+    $differentTargets = @($existingTargets | Where-Object { $_ -ne $fqdn })
+
+    # Comprobar ambos conflictos antes de crear cualquiera de los registros.
     if ($differentIps.Count -gt 0) {
-        throw "Conflicto: '$fqdn' tiene otra IP: $($existingIps -join ', ')."
+        throw "Conflicto A: '$fqdn' tiene otra IP: $($existingIps -join ', '). No se modificaron registros."
     }
 
-    if ($existingIps -contains $ipAddress) {
-        $status = 'alreadyExists'
+    if ($differentTargets.Count -gt 0) {
+        throw "Conflicto PTR: '$ipAddress' apunta a: $($existingTargets -join ', '). No se modificaron registros."
     }
-    else {
+
+    $aStatus = 'alreadyExists'
+    $ptrStatus = 'alreadyExists'
+
+    if ($existingIps -notcontains $ipAddress) {
         $stage = 'Crear registro A'
 
         Add-DnsServerResourceRecordA -ComputerName $dnsServer -ZoneName $zoneName -Name $recordName -IPv4Address $ipAddress -ErrorAction Stop
 
-        $created = $true
-        $status = 'created'
+        $aCreated = $true
+        $aStatus = 'created'
     }
 
-    $stage = 'Verificar registro A'
+    if ($existingTargets -notcontains $fqdn) {
+        $stage = 'Crear registro PTR'
+
+        Add-DnsServerResourceRecordPtr -ComputerName $dnsServer -ZoneName $reverseZoneName -Name $reverseRecordName -PtrDomainName $ptrTarget -ErrorAction Stop
+
+        $ptrCreated = $true
+        $ptrStatus = 'created'
+    }
+
+    $stage = 'Verificar registros A y PTR'
 
     $verifiedIps = @(
         Get-DnsServerResourceRecord -ComputerName $dnsServer -ZoneName $zoneName -Name $recordName -RRType A -ErrorAction Stop |
             ForEach-Object { $_.RecordData.IPv4Address.ToString() }
     )
 
+    $verifiedTargets = @(
+        Get-DnsServerResourceRecord -ComputerName $dnsServer -ZoneName $reverseZoneName -Name $reverseRecordName -RRType PTR -ErrorAction Stop |
+            ForEach-Object { Normalize-DnsName $_.RecordData.PtrDomainName }
+    )
+
     $unexpectedIps = @($verifiedIps | Where-Object { $_ -ne $ipAddress })
+    $unexpectedTargets = @($verifiedTargets | Where-Object { $_ -ne $fqdn })
 
     if (($verifiedIps -notcontains $ipAddress) -or ($unexpectedIps.Count -gt 0)) {
-        throw "La verificación no coincide con la IP solicitada. IPs: $($verifiedIps -join ', ')."
+        throw "La verificación del A no coincide. IPs encontradas: $($verifiedIps -join ', ')."
+    }
+
+    if (($verifiedTargets -notcontains $fqdn) -or ($unexpectedTargets.Count -gt 0)) {
+        throw "La verificación del PTR no coincide. Destinos encontrados: $($verifiedTargets -join ', ')."
+    }
+
+    $status = 'alreadyExists'
+    if ($aCreated -or $ptrCreated) {
+        $status = 'created'
     }
 
     $response = [ordered]@{
-        success      = $true
-        status       = $status
-        computerName = $env:COMPUTERNAME
-        executedAs   = $identity
-        dnsServer    = $dnsServer
-        zoneName     = $zoneName
-        fqdn         = $fqdn
-        ipAddress    = $ipAddress
-        created      = $created
-        ptrCreated   = $false
+        success           = $true
+        status            = $status
+        computerName      = $env:COMPUTERNAME
+        executedAs        = $identity
+        dnsServer         = $dnsServer
+        zoneName          = $zoneName
+        fqdn              = $fqdn
+        ipAddress         = $ipAddress
+        reverseZoneName   = $reverseZoneName
+        reverseRecordName = $reverseRecordName
+        ptrTarget         = $ptrTarget
+        aStatus           = $aStatus
+        ptrStatus         = $ptrStatus
+        aCreated          = $aCreated
+        ptrCreated        = $ptrCreated
     }
 }
 catch {
     $failure = $_
     $exitCode = 1
 
+    # No deshacer automáticamente cambios ya completados.
     $response = [ordered]@{
         success               = $false
         computerName          = $env:COMPUTERNAME
         stage                 = $stage
-        created               = $created
+        aCreated              = $aCreated
+        ptrCreated            = $ptrCreated
         error                 = $failure.Exception.Message
         fullyQualifiedErrorId = $failure.FullyQualifiedErrorId
         scriptLineNumber      = $failure.InvocationInfo.ScriptLineNumber
     }
 }
 
-# Emitir el JSON antes de terminar el proceso.
-$responseJson = $response | ConvertTo-Json -Compress
-[Console]::Out.WriteLine($responseJson)
+[Console]::Out.WriteLine(($response | ConvertTo-Json -Compress))
 [Console]::Out.Flush()
 exit $exitCode
 '@
@@ -200,11 +280,10 @@ exit $exitCode
                 }
             ) -join '; '
 
-            throw "Errores de sintaxis en el script remoto: $details"
+            throw "Errores de sintaxis: $details"
         }
 
         $stage = 'Comprimir script remoto'
-
         $scriptBytes = [Text.Encoding]::UTF8.GetBytes($guestScript)
         $memoryStream = [IO.MemoryStream]::new()
 
@@ -230,7 +309,6 @@ exit $exitCode
             $memoryStream.Dispose()
         }
 
-        # Lanzador corto: descomprime y ejecuta en memoria.
         $bootstrap = @'
 $ErrorActionPreference = 'Stop'
 try {
@@ -276,7 +354,6 @@ catch {
         Write-Host "Etapa: $stage"
 
         $vmName = [string]$settings.executionVmName
-
         $vms = @(
             Get-VM -Server $connection -Name $vmName -ErrorAction Stop |
                 Where-Object { $_.Name -eq $vmName }
@@ -306,26 +383,22 @@ catch {
             -ErrorAction Stop
 
         $stage = 'Validar resultado'
-        Write-Host "Etapa: $stage"
-
         $scriptOutput = ([string]$result.ScriptOutput).Trim()
 
         Write-Host "Código de salida remoto: $($result.ExitCode)"
         Write-Host "Caracteres recibidos: $($scriptOutput.Length)"
 
-        if (-not [string]::IsNullOrWhiteSpace($scriptOutput)) {
-            Write-Host "Resultado remoto: $scriptOutput"
+        if ([string]::IsNullOrWhiteSpace($scriptOutput)) {
+            throw "El proceso remoto terminó con código $($result.ExitCode) sin salida. El estado de los registros debe verificarse en DNS."
         }
-        else {
-            throw "El proceso remoto terminó con código $($result.ExitCode) sin salida. No se puede determinar si creó el registro."
-        }
+
+        Write-Host "Resultado remoto: $scriptOutput"
 
         if ($result.ExitCode -ne 0) {
             throw "El script remoto terminó con código $($result.ExitCode). $scriptOutput"
         }
 
-        $parsedResult = $scriptOutput |
-            ConvertFrom-Json -ErrorAction Stop
+        $parsedResult = $scriptOutput | ConvertFrom-Json -ErrorAction Stop
 
         if ($parsedResult.success -ne $true) {
             throw "La operación DNS no reportó éxito. $scriptOutput"
@@ -334,9 +407,11 @@ catch {
         Write-Host 'Operación DNS completada correctamente.'
         Write-Host "Equipo: $($parsedResult.computerName)"
         Write-Host "Ejecutado como: $($parsedResult.executedAs)"
-        Write-Host "Estado: $($parsedResult.status)"
-        Write-Host "Registro: $($parsedResult.fqdn)"
-        Write-Host "IP: $($parsedResult.ipAddress)"
+        Write-Host "Registro A: $($parsedResult.fqdn) -> $($parsedResult.ipAddress)"
+        Write-Host "Estado A: $($parsedResult.aStatus)"
+        Write-Host "Registro PTR: $($parsedResult.ipAddress) -> $($parsedResult.ptrTarget)"
+        Write-Host "Zona reversa: $($parsedResult.reverseZoneName)"
+        Write-Host "Estado PTR: $($parsedResult.ptrStatus)"
 
         return $scriptOutput
     }
