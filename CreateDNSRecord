@@ -193,3 +193,9 @@ catch {
         }
     }
 }
+
+Select-String `
+    -Path "$env:windir\Logs\CBS\CBS.log" `
+    -Pattern '0x80073701|ERROR_SXS_ASSEMBLY_MISSING|Failed to pin deployment' `
+    -Context 3,3 |
+    Select-Object -Last 15
