@@ -4,16 +4,18 @@ function Handler($context, $inputs) {
     $stage = 'Validar configuración'
 
     try {
-        foreach ($name in @(
-            'vCenter',
-            'vCenterUsername',
-            'vCenterPassword',
-            'executionVmName',
-            'guestUsername',
-            'guestPassword'
-        )) {
-            if ([string]::IsNullOrWhiteSpace([string]$inputs[$name])) {
-                throw "Falta configurar el parámetro: $name"
+        $settings = @{
+            vCenter          = $inputs.vCenter
+            vCenterUsername  = $inputs.vCenterUsername
+            vCenterPassword  = $inputs.vCenterPassword
+            executionVmName  = $inputs.executionVmName
+            guestUsername    = $inputs.guestUsername
+            guestPassword    = $inputs.guestPassword
+        }
+        
+        foreach ($name in $settings.Keys) {
+            if ([string]::IsNullOrWhiteSpace([string]$settings[$name])) {
+                throw "El input '$name' llegó vacío a la tarea. Revisa su vínculo."
             }
         }
 
