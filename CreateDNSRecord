@@ -4,8 +4,7 @@ function Handler($context, $inputs) {
     $stage = 'Validar configuración'
 
     try {
-        # Credenciales y configuración recibidas del workflow.
-        # Nunca imprimir este objeto en los logs.
+        # Nunca imprimir este objeto: contiene credenciales.
         $settings = @{
             vCenter         = $inputs.vCenter
             vCenterUsername = $inputs.vCenterUsername
@@ -25,46 +24,7 @@ function Handler($context, $inputs) {
             }
         }
 
-        Set-PowerCLIConfiguration `
-            -InvalidCertificateAction Ignore `
-            -Scope Session `
-            -Confirm:$false | Out-Null
-
-        $stage = 'Conectar a vCenter'
-        Write-Host "Etapa: $stage"
-
-        $connection = Connect-VIServer `
-            -Server $settings.vCenter `
-            -User $settings.vCenterUsername `
-            -Password $settings.vCenterPassword `
-            -NotDefault `
-            -ErrorAction Stop
-
-        $stage = 'Localizar VM'
-        Write-Host "Etapa: $stage"
-
-        $vmName = [string]$settings.executionVmName
-
-        $vms = @(
-            Get-VM `
-                -Server $connection `
-                -Name $vmName `
-                -ErrorAction Stop |
-                Where-Object { $_.Name -eq $vmName }
-        )
-
-        if ($vms.Count -ne 1) {
-            throw "Se esperaba una única VM llamada '$vmName'; encontradas: $($vms.Count)."
-        }
-
-        $vm = $vms[0]
-
-        if ($vm.PowerState -ne 'PoweredOn') {
-            throw "La VM '$vmName' no está encendida."
-        }
-
-        # Enviar solamente los parámetros DNS al script remoto.
-        # Base64 conserva el contenido JSON sin insertarlo como código.
+        # Preparar únicamente los datos DNS para Windows.
         $dnsParameters = @{
             dnsServer  = ([string]$settings.dnsServer).Trim()
             zoneName   = ([string]$settings.zoneName).Trim().TrimEnd('.')
@@ -76,7 +36,7 @@ function Handler($context, $inputs) {
             [Text.Encoding]::UTF8.GetBytes($dnsParameters)
         )
 
-        # Este bloque se ejecuta dentro de Windows mediante VMware Tools.
+        # Este bloque se ejecuta dentro de la VM Windows.
         $guestScript = @'
 $ErrorActionPreference = 'Stop'
 $stage = 'Validar parámetros'
@@ -96,7 +56,6 @@ try {
 
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    # Solo aceptar hostname simple, sin dominio.
     if ($recordName -notmatch '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
         throw 'recordName debe tener entre 1 y 63 caracteres: letras, números y guiones internos, sin dominio.'
     }
@@ -109,7 +68,6 @@ try {
         throw 'zoneName está vacío.'
     }
 
-    # Exigir una IPv4 con cuatro octetos decimales.
     if ($ipAddress -notmatch '^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$') {
         throw 'ipAddress debe ser una IPv4 con cuatro octetos decimales.'
     }
@@ -147,8 +105,8 @@ try {
 
     $stage = 'Comprobar registros existentes'
 
-    # Consulta la zona y filtra el nombre exacto.
-    # Los errores de acceso o conectividad deben detener la operación.
+    # Consultar la zona y filtrar el nombre exacto.
+    # No ocultar errores de permisos o conectividad.
     $records = @(
         Get-DnsServerResourceRecord `
             -ComputerName $dnsServer `
@@ -183,7 +141,6 @@ try {
     }
 
     if ($existingIps -contains $ipAddress) {
-        # El registro ya coincide: no modificarlo.
         $status = 'alreadyExists'
     }
     else {
@@ -227,7 +184,7 @@ try {
         throw "La verificación no coincide con la IP solicitada. IPs encontradas: $($verifiedIps -join ', ')."
     }
 
-    [ordered]@{
+    $response = [ordered]@{
         success      = $true
         status       = $status
         computerName = $env:COMPUTERNAME
@@ -238,21 +195,26 @@ try {
         ipAddress    = $ipAddress
         created      = $created
         ptrCreated   = $false
-    } | ConvertTo-Json -Compress
+    }
 
+    $response | ConvertTo-Json -Compress
     exit 0
 }
 catch {
-    # Si la creación terminó y falló la verificación,
-    # created será true. No eliminar automáticamente el registro.
-    [ordered]@{
-        success      = $false
-        computerName = $env:COMPUTERNAME
-        stage        = $stage
-        created      = $created
-        error        = $_.Exception.Message
-    } | ConvertTo-Json -Compress
+    $failure = $_
 
+    # Conservar información del error sin incluir credenciales.
+    $response = [ordered]@{
+        success               = $false
+        computerName          = $env:COMPUTERNAME
+        stage                 = $stage
+        created               = $created
+        error                 = $failure.Exception.Message
+        fullyQualifiedErrorId = $failure.FullyQualifiedErrorId
+        scriptLineNumber      = $failure.InvocationInfo.ScriptLineNumber
+    }
+
+    $response | ConvertTo-Json -Compress
     exit 1
 }
 '@
@@ -261,6 +223,68 @@ catch {
             '__DNS_PARAMETERS__',
             $dnsParametersBase64
         )
+
+        # Validar sintaxis antes de enviar el script a Windows.
+        # Esta comprobación usa el parser del runtime PowerShell 7.4.
+        $stage = 'Validar sintaxis del script remoto'
+        Write-Host "Etapa: $stage"
+
+        $tokens = $null
+        $parseErrors = $null
+
+        $null = [System.Management.Automation.Language.Parser]::ParseInput(
+            $guestScript,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+
+        if ($parseErrors.Count -gt 0) {
+            $details = (
+                $parseErrors | ForEach-Object {
+                    "Línea $($_.Extent.StartLineNumber): $($_.Message)"
+                }
+            ) -join '; '
+
+            throw "El script remoto tiene errores de sintaxis: $details"
+        }
+
+        Set-PowerCLIConfiguration `
+            -InvalidCertificateAction Ignore `
+            -Scope Session `
+            -Confirm:$false | Out-Null
+
+        $stage = 'Conectar a vCenter'
+        Write-Host "Etapa: $stage"
+
+        $connection = Connect-VIServer `
+            -Server $settings.vCenter `
+            -User $settings.vCenterUsername `
+            -Password $settings.vCenterPassword `
+            -NotDefault `
+            -ErrorAction Stop
+
+        $stage = 'Localizar VM'
+        Write-Host "Etapa: $stage"
+
+        $vmName = [string]$settings.executionVmName
+
+        $vms = @(
+            Get-VM `
+                -Server $connection `
+                -Name $vmName `
+                -ErrorAction Stop |
+                Where-Object { $_.Name -eq $vmName }
+        )
+
+        if ($vms.Count -ne 1) {
+            throw "Se esperaba una única VM llamada '$vmName'; encontradas: $($vms.Count)."
+        }
+
+        $vm = $vms[0]
+
+        if ($vm.PowerState -ne 'PoweredOn') {
+            throw "La VM '$vmName' no está encendida."
+        }
 
         $stage = 'Ejecutar operación DNS mediante VMware Tools'
         Write-Host "Etapa: $stage"
@@ -280,12 +304,19 @@ catch {
 
         $scriptOutput = ([string]$result.ScriptOutput).Trim()
 
-        if ($result.ExitCode -ne 0) {
-            throw "El script remoto terminó con código $($result.ExitCode). $scriptOutput"
+        Write-Host "Código de salida remoto: $($result.ExitCode)"
+        Write-Host "Caracteres recibidos: $($scriptOutput.Length)"
+
+        if (-not [string]::IsNullOrWhiteSpace($scriptOutput)) {
+            Write-Host "Resultado remoto: $scriptOutput"
         }
 
         if ([string]::IsNullOrWhiteSpace($scriptOutput)) {
-            throw 'El script remoto no devolvió ningún resultado.'
+            throw "El proceso remoto terminó con código $($result.ExitCode), pero no devolvió salida. No se puede determinar si creó el registro."
+        }
+
+        if ($result.ExitCode -ne 0) {
+            throw "El script remoto terminó con código $($result.ExitCode). $scriptOutput"
         }
 
         $parsedResult = $scriptOutput |
