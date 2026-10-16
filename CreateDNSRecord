@@ -4,7 +4,6 @@ function Handler($context, $inputs) {
     $stage = 'Validar configuración'
 
     try {
-        # Leer los inputs sin imprimir credenciales.
         $settings = @{
             vCenter         = $inputs.vCenter
             vCenterUsername = $inputs.vCenterUsername
@@ -12,20 +11,21 @@ function Handler($context, $inputs) {
             executionVmName = $inputs.executionVmName
             guestUsername   = $inputs.guestUsername
             guestPassword   = $inputs.guestPassword
+            dnsServer       = $inputs.dnsServer
+            zoneName        = $inputs.zoneName
         }
 
         foreach ($name in $settings.Keys) {
             if ([string]::IsNullOrWhiteSpace([string]$settings[$name])) {
-                throw "El input '$name' llegó vacío a la acción. Revisa su vínculo."
+                throw "El input '$name' llegó vacío. Revisa su vínculo."
             }
         }
-  
-        Set-PowerCLIConfiguration `
-        -InvalidCertificateAction Ignore `
-        -Scope Session `
-        -Confirm:$false | Out-Null
 
-        # Conectar únicamente al vCenter configurado.
+        Set-PowerCLIConfiguration `
+            -InvalidCertificateAction Ignore `
+            -Scope Session `
+            -Confirm:$false | Out-Null
+
         $stage = 'Conectar a vCenter'
         Write-Host "Etapa: $stage"
 
@@ -36,7 +36,6 @@ function Handler($context, $inputs) {
             -NotDefault `
             -ErrorAction Stop
 
-        # Localizar una única VM con el nombre exacto.
         $stage = 'Localizar VM'
         Write-Host "Etapa: $stage"
 
@@ -60,83 +59,81 @@ function Handler($context, $inputs) {
             throw "La VM '$vmName' no está encendida."
         }
 
-        # Este script se ejecutará dentro de Windows mediante VMware Tools.
-        # No realiza consultas ni modificaciones en DNS.
+        # Preparar parámetros para el script que se ejecutará en Windows.
+        $dnsParameters = @{
+            dnsServer = ([string]$settings.dnsServer).Trim()
+            zoneName  = ([string]$settings.zoneName).Trim()
+        } | ConvertTo-Json -Compress
+
+        $dnsParametersBase64 = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($dnsParameters)
+        )
+
+        # Este bloque se ejecuta dentro de la VM mediante VMware Tools.
         $guestScript = @'
 $ErrorActionPreference = 'Stop'
-$testFile = $null
+$stage = 'Leer parámetros DNS'
 
 try {
-    $computerName = $env:COMPUTERNAME
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-
-    $testFile = Join-Path -Path $env:TEMP -ChildPath (
-        'vro-execution-test-' + [guid]::NewGuid().ToString() + '.txt'
+    $parametersJson = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String('__DNS_PARAMETERS__')
     )
 
-    $expectedContent = 'Prueba de ejecucion remota desde Orchestrator'
+    $parameters = $parametersJson | ConvertFrom-Json
 
-    # Crear el archivo de prueba.
-    Set-Content `
-        -LiteralPath $testFile `
-        -Value $expectedContent `
-        -Encoding UTF8 `
-        -ErrorAction Stop
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    # Leer y comprobar el contenido.
-    $actualContent = Get-Content `
-        -LiteralPath $testFile `
-        -Raw `
-        -ErrorAction Stop
+    $stage = 'Comprobar módulo DnsServer'
 
-    if ($actualContent.TrimEnd() -ne $expectedContent) {
-        throw 'El contenido leído no coincide con el contenido escrito.'
+    if (-not (Get-Module -ListAvailable -Name DnsServer)) {
+        throw 'El módulo DnsServer no está instalado en la VM de ejecución.'
     }
 
-    # Eliminar únicamente el archivo generado por esta ejecución.
-    Remove-Item `
-        -LiteralPath $testFile `
-        -Force `
+    Import-Module DnsServer -ErrorAction Stop
+
+    $stage = 'Consultar zona DNS'
+
+    $zone = Get-DnsServerZone `
+        -ComputerName $parameters.dnsServer `
+        -Name $parameters.zoneName `
         -ErrorAction Stop
 
-    if (Test-Path -LiteralPath $testFile) {
-        throw 'No fue posible eliminar el archivo de prueba.'
+    if ($null -eq $zone) {
+        throw 'La consulta no devolvió la zona solicitada.'
     }
 
     [ordered]@{
-        success      = $true
-        computerName = $computerName
-        executedAs   = $identity
-        filePath     = $testFile
-        fileCreated  = $true
-        fileRead     = $true
-        fileDeleted  = $true
+        success        = $true
+        computerName   = $env:COMPUTERNAME
+        executedAs     = $identity
+        dnsServer      = $parameters.dnsServer
+        zoneName       = $zone.ZoneName
+        zoneType       = [string]$zone.ZoneType
+        isDsIntegrated = [bool]$zone.IsDsIntegrated
+        moduleLoaded   = $true
+        zoneAccessible = $true
     } | ConvertTo-Json -Compress
 
     exit 0
 }
 catch {
-    $failureMessage = $_.Exception.Message
-
-    # Intentar limpiar el archivo si la prueba falló.
-    if ($testFile) {
-        Remove-Item `
-            -LiteralPath $testFile `
-            -Force `
-            -ErrorAction SilentlyContinue
-    }
-
     [ordered]@{
         success      = $false
         computerName = $env:COMPUTERNAME
-        error        = $failureMessage
+        stage        = $stage
+        error        = $_.Exception.Message
     } | ConvertTo-Json -Compress
 
     exit 1
 }
 '@
 
-        $stage = 'Ejecutar PowerShell mediante VMware Tools'
+        $guestScript = $guestScript.Replace(
+            '__DNS_PARAMETERS__',
+            $dnsParametersBase64
+        )
+
+        $stage = 'Ejecutar validación DNS mediante VMware Tools'
         Write-Host "Etapa: $stage"
 
         $result = Invoke-VMScript `
@@ -149,7 +146,6 @@ catch {
             -ToolsWaitSecs 60 `
             -ErrorAction Stop
 
-        # Comprobar el resultado del proceso dentro de Windows.
         $stage = 'Validar resultado'
         Write-Host "Etapa: $stage"
 
@@ -167,29 +163,29 @@ catch {
             ConvertFrom-Json -ErrorAction Stop
 
         if ($parsedResult.success -ne $true) {
-            throw "La prueba remota no reportó éxito. $scriptOutput"
+            throw "La validación DNS no reportó éxito. $scriptOutput"
         }
 
-        Write-Host "Prueba completada correctamente."
+        Write-Host 'Validación DNS completada correctamente.'
         Write-Host "Equipo: $($parsedResult.computerName)"
         Write-Host "Ejecutado como: $($parsedResult.executedAs)"
-        Write-Host "Archivo creado, leído y eliminado correctamente."
+        Write-Host "Servidor DNS: $($parsedResult.dnsServer)"
+        Write-Host "Zona accesible: $($parsedResult.zoneName)"
+        Write-Host "Tipo de zona: $($parsedResult.zoneType)"
+        Write-Host "Integrada con AD: $($parsedResult.isDsIntegrated)"
 
-        # La acción tiene Return type: string.
         return $scriptOutput
     }
     catch {
         throw "Falló la etapa '$stage': $($_.Exception.Message)"
     }
     finally {
-        # Cerrar solamente la conexión abierta por esta acción.
         if ($null -ne $connection) {
             try {
                 Disconnect-VIServer `
                     -Server $connection `
                     -Confirm:$false `
-                    -ErrorAction Stop |
-                    Out-Null
+                    -ErrorAction Stop | Out-Null
             }
             catch {
                 Write-Warning 'No fue posible cerrar la conexión a vCenter.'
