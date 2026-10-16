@@ -19,8 +19,10 @@ function Handler($context, $inputs) {
                 throw "El input '$name' llegó vacío a la acción. Revisa su vínculo."
             }
         }
+  
         Set-PowerCLIConfiguration `
         -InvalidCertificateAction Ignore `
+        -Scope Session `
         -Confirm:$false | Out-Null
 
         # Conectar únicamente al vCenter configurado.
