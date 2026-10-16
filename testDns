@@ -1,0 +1,51 @@
+whoami
+
+Import-Module DnsServer -ErrorAction Stop
+
+$dnsServer = 'crcordc01.bacnet.corp.redbac.com'
+$zoneName = 'bacnet.corp.redbac.com'
+$recordName = 'test-aria-01'
+$ipAddress = '10.136.18.230'
+
+try {
+    $records = @(
+        Get-DnsServerResourceRecord `
+            -ComputerName $dnsServer `
+            -ZoneName $zoneName `
+            -ErrorAction Stop |
+            Where-Object { $_.HostName -eq $recordName }
+    )
+
+    if ($records.Count -eq 0) {
+        Write-Host 'El nombre no tiene registros en esta zona.'
+    }
+    else {
+        $records | Format-List HostName, RecordType, RecordData
+    }
+}
+catch {
+    $_ | Format-List * -Force
+}
+
+
+
+
+
+
+
+
+=================
+
+try {
+    Add-DnsServerResourceRecordA `
+        -ComputerName $dnsServer `
+        -ZoneName $zoneName `
+        -Name $recordName `
+        -IPv4Address $ipAddress `
+        -ErrorAction Stop
+
+    Write-Host 'Registro A creado correctamente.'
+}
+catch {
+    $_ | Format-List * -Force
+}
