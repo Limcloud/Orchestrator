@@ -74,3 +74,16 @@ foreach ($record in $testRecords) {
 
     Write-Host "Eliminado: $($record.Name) -> $($record.IP)"
 }
+
+
+Get-DnsServerZone `
+    -ComputerName 'crcordc01.bacnet.corp.redbac.com' `
+    -ErrorAction Stop |
+    Where-Object { $_.IsReverseLookupZone } |
+    Select-Object ZoneName
+
+
+
+
+
+
