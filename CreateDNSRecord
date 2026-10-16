@@ -3,150 +3,297 @@ function Handler($context, $inputs) {
     $connection = $null
 
     try {
-        foreach ($name in @(
-            'vCenter', 'vCenterUsername', 'vCenterPassword',
-            'executionVmName', 'guestUsername', 'guestPassword',
-            'dnsServer', 'zoneName', 'recordName', 'ipAddress'
-        )) {
-            $value = $inputs.$name
-            if ([string]::IsNullOrWhiteSpace([string]$value)) {
-                throw "Falta el input '$name'."
-            }
-        }
-
-        $name = ([string]$inputs.recordName).Trim().ToLowerInvariant()
-        $ip = ([string]$inputs.ipAddress).Trim()
-        $zone = ([string]$inputs.zoneName).Trim().TrimEnd('.').ToLowerInvariant()
-
-        if ($name -notmatch '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
-            throw 'recordName debe ser un hostname válido de hasta 63 caracteres, sin dominio.'
-        }
-
-        if ($ip -notmatch '^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$') {
-            throw 'ipAddress debe ser una IPv4 válida.'
-        }
-
-        foreach ($octet in $ip.Split('.')) {
-            if ([int]$octet -gt 255) {
-                throw 'ipAddress contiene un octeto mayor que 255.'
-            }
-        }
-
-        $data = @{
-            server = ([string]$inputs.dnsServer).Trim()
-            zone   = $zone
-            name   = $name
-            ip     = $ip
-        } | ConvertTo-Json -Compress
-
-        $data = [Convert]::ToBase64String(
-            [Text.Encoding]::UTF8.GetBytes($data)
+        # Validar inputs obligatorios.
+        $requiredInputs = @(
+            'vCenter'
+            'vCenterUsername'
+            'vCenterPassword'
+            'executionVmName'
+            'guestUsername'
+            'guestPassword'
+            'dnsServer'
+            'zoneName'
+            'recordName'
+            'ipAddress'
         )
 
-        $script = @'
+        foreach ($inputName in $requiredInputs) {
+            if ([string]::IsNullOrWhiteSpace([string]$inputs.$inputName)) {
+                throw "El input '$inputName' es obligatorio."
+            }
+        }
+
+        $recordName = ([string]$inputs.recordName).Trim().ToLowerInvariant()
+        $zoneName = ([string]$inputs.zoneName).Trim().TrimEnd('.').ToLowerInvariant()
+        $ipAddress = ([string]$inputs.ipAddress).Trim()
+
+        # recordName debe ser el nombre corto del servidor.
+        if ($recordName -notmatch '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
+            throw "recordName debe ser un nombre corto válido, sin dominio."
+        }
+
+        # Validar una dirección IPv4.
+        if ($ipAddress -notmatch '^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$') {
+            throw "La dirección '$ipAddress' no es una IPv4 válida."
+        }
+
+        foreach ($octet in $ipAddress.Split('.')) {
+            if ([int]$octet -gt 255) {
+                throw "La dirección '$ipAddress' no es una IPv4 válida."
+            }
+        }
+
+        # Datos enviados al script del guest.
+        $parameters = @{
+            server = ([string]$inputs.dnsServer).Trim()
+            zone   = $zoneName
+            name   = $recordName
+            ip     = $ipAddress
+        } | ConvertTo-Json -Compress
+
+        $encodedParameters = [Convert]::ToBase64String(
+            [Text.Encoding]::UTF8.GetBytes($parameters)
+        )
+
+        # Script ejecutado dentro de la VM Windows.
+        $guestScript = @'
 $ErrorActionPreference = 'Stop'
 $aCreated = $false
 $ptrCreated = $false
-$code = 0
+$exitCode = 0
+
 try {
-    $p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__DATA__')) | ConvertFrom-Json
+    $json = [Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String('__DATA__')
+    )
+    $p = $json | ConvertFrom-Json
+
     Import-Module DnsServer -ErrorAction Stop
 
     $o = $p.ip.Split('.')
-    $rz = "$($o[2]).$($o[1]).$($o[0]).in-addr.arpa"
-    $rn = $o[3]
     $fqdn = "$($p.name).$($p.zone)"
 
-    $zones = @(Get-DnsServerZone -ComputerName $p.server -ErrorAction Stop)
-    if (-not ($zones | Where-Object { $_.ZoneName -eq $p.zone -and -not $_.IsReverseLookupZone })) {
-        throw "No se encontró la zona directa '$($p.zone)'. No se crearon registros."
-    }
-    if (-not ($zones | Where-Object { $_.ZoneName -eq $rz -and $_.IsReverseLookupZone })) {
-        throw "No se encontró la zona reversa '$rz'. No se crearon registros."
-    }
+    $zones = @(
+        Get-DnsServerZone -ComputerName $p.server -ErrorAction Stop
+    )
 
-    $forward = @(Get-DnsServerResourceRecord -ComputerName $p.server -ZoneName $p.zone -ErrorAction Stop | Where-Object { $_.HostName -eq $p.name })
-    $reverse = @(Get-DnsServerResourceRecord -ComputerName $p.server -ZoneName $rz -ErrorAction Stop | Where-Object { $_.HostName -eq $rn })
-
-    if (@($forward + $reverse | Where-Object { $_.RecordType -eq 'CNAME' }).Count) {
-        throw 'Conflicto: existe un CNAME en el nombre directo o reverso.'
+    # Validar la zona directa antes de crear registros.
+    if (-not ($zones | Where-Object {
+        $_.ZoneName -eq $p.zone -and -not $_.IsReverseLookupZone
+    })) {
+        throw "No existe la zona directa '$($p.zone)'. No se crearon registros."
     }
 
-    $ips = @($forward | Where-Object { $_.RecordType -eq 'A' } | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
-    $targets = @($reverse | Where-Object { $_.RecordType -eq 'PTR' } | ForEach-Object { $_.RecordData.PtrDomainName.TrimEnd('.').ToLowerInvariant() })
+    # Buscar la zona reversa existente más específica.
+    $candidates = @(
+        "$($o[2]).$($o[1]).$($o[0]).in-addr.arpa"
+        "$($o[1]).$($o[0]).in-addr.arpa"
+        "$($o[0]).in-addr.arpa"
+    )
 
-    if (@($ips | Where-Object { $_ -ne $p.ip }).Count) {
-        throw "Conflicto A: '$fqdn' tiene otra IP: $($ips -join ', ')."
-    }
-    if (@($targets | Where-Object { $_ -ne $fqdn }).Count) {
-        throw "Conflicto PTR: '$($p.ip)' apunta a otro nombre: $($targets -join ', ')."
+    $rz = $null
+
+    foreach ($candidate in $candidates) {
+        if ($zones | Where-Object {
+            $_.IsReverseLookupZone -and $_.ZoneName -eq $candidate
+        }) {
+            $rz = $candidate
+            break
+        }
     }
 
-    if ($ips -notcontains $p.ip) {
-        Add-DnsServerResourceRecordA -ComputerName $p.server -ZoneName $p.zone -Name $p.name -IPv4Address $p.ip -ErrorAction Stop
+    if (-not $rz) {
+        throw "No existe una zona reversa compatible con la IP '$($p.ip)'. No se crearon registros."
+    }
+
+    $reverseName = "$($o[3]).$($o[2]).$($o[1]).$($o[0]).in-addr.arpa"
+    $rn = $reverseName.Substring(0, $reverseName.Length - $rz.Length - 1)
+
+    # Consultar registros existentes.
+    # Los errores de consulta detienen la ejecución.
+    $forward = @(
+        Get-DnsServerResourceRecord `
+            -ComputerName $p.server `
+            -ZoneName $p.zone `
+            -ErrorAction Stop |
+        Where-Object { $_.HostName -eq $p.name }
+    )
+
+    $reverse = @(
+        Get-DnsServerResourceRecord `
+            -ComputerName $p.server `
+            -ZoneName $rz `
+            -ErrorAction Stop |
+        Where-Object { $_.HostName -eq $rn }
+    )
+
+    # Validar conflictos antes de crear registros.
+    $aliases = @(
+        ($forward + $reverse) |
+        Where-Object { $_.RecordType -eq 'CNAME' }
+    )
+
+    if ($aliases.Count -gt 0) {
+        throw "Existe un CNAME en el nombre directo o reverso solicitado. No se crearon registros."
+    }
+
+    $existingIps = @(
+        $forward |
+        Where-Object { $_.RecordType -eq 'A' } |
+        ForEach-Object { $_.RecordData.IPv4Address.ToString() }
+    )
+
+    $existingTargets = @(
+        $reverse |
+        Where-Object { $_.RecordType -eq 'PTR' } |
+        ForEach-Object {
+            $_.RecordData.PtrDomainName.TrimEnd('.').ToLowerInvariant()
+        }
+    )
+
+    if (@($existingIps | Where-Object { $_ -ne $p.ip }).Count -gt 0) {
+        throw "El nombre '$fqdn' ya tiene un registro A con otra IP. No se crearon registros."
+    }
+
+    if (@($existingTargets | Where-Object { $_ -ne $fqdn }).Count -gt 0) {
+        throw "La IP '$($p.ip)' ya tiene un PTR hacia otro nombre. No se crearon registros."
+    }
+
+    # Crear únicamente los registros que faltan.
+    if ($existingIps -notcontains $p.ip) {
+        Add-DnsServerResourceRecordA `
+            -ComputerName $p.server `
+            -ZoneName $p.zone `
+            -Name $p.name `
+            -IPv4Address $p.ip `
+            -ErrorAction Stop
+
         $aCreated = $true
     }
-    if ($targets -notcontains $fqdn) {
-        Add-DnsServerResourceRecordPtr -ComputerName $p.server -ZoneName $rz -Name $rn -PtrDomainName "$fqdn." -ErrorAction Stop
+
+    if ($existingTargets -notcontains $fqdn) {
+        Add-DnsServerResourceRecordPtr `
+            -ComputerName $p.server `
+            -ZoneName $rz `
+            -Name $rn `
+            -PtrDomainName "$fqdn." `
+            -ErrorAction Stop
+
         $ptrCreated = $true
     }
 
-    $ips = @(Get-DnsServerResourceRecord -ComputerName $p.server -ZoneName $p.zone -Name $p.name -RRType A -ErrorAction Stop | ForEach-Object { $_.RecordData.IPv4Address.ToString() })
-    $targets = @(Get-DnsServerResourceRecord -ComputerName $p.server -ZoneName $rz -Name $rn -RRType PTR -ErrorAction Stop | ForEach-Object { $_.RecordData.PtrDomainName.TrimEnd('.').ToLowerInvariant() })
+    # Verificar ambos registros en el servidor DNS.
+    $verifiedIps = @(
+        Get-DnsServerResourceRecord `
+            -ComputerName $p.server `
+            -ZoneName $p.zone `
+            -Name $p.name `
+            -RRType A `
+            -ErrorAction Stop |
+        ForEach-Object { $_.RecordData.IPv4Address.ToString() }
+    )
 
-    if (($ips -notcontains $p.ip) -or ($targets -notcontains $fqdn) -or
-        @($ips | Where-Object { $_ -ne $p.ip }).Count -or
-        @($targets | Where-Object { $_ -ne $fqdn }).Count) {
-        throw 'La verificación final de A/PTR no coincide.'
+    $verifiedTargets = @(
+        Get-DnsServerResourceRecord `
+            -ComputerName $p.server `
+            -ZoneName $rz `
+            -Name $rn `
+            -RRType PTR `
+            -ErrorAction Stop |
+        ForEach-Object {
+            $_.RecordData.PtrDomainName.TrimEnd('.').ToLowerInvariant()
+        }
+    )
+
+    if (
+        $verifiedIps -notcontains $p.ip -or
+        @($verifiedIps | Where-Object { $_ -ne $p.ip }).Count -gt 0
+    ) {
+        throw "La verificación del registro A de '$fqdn' falló."
+    }
+
+    if (
+        $verifiedTargets -notcontains $fqdn -or
+        @($verifiedTargets | Where-Object { $_ -ne $fqdn }).Count -gt 0
+    ) {
+        throw "La verificación del PTR de '$($p.ip)' falló."
     }
 
     $status = 'alreadyExists'
-    if ($aCreated -or $ptrCreated) { $status = 'created' }
-    $result = @{success=$true; status=$status; fqdn=$fqdn; ipAddress=$p.ip; reverseZone=$rz; aCreated=$aCreated; ptrCreated=$ptrCreated}
+    if ($aCreated -or $ptrCreated) {
+        $status = 'created'
+    }
+
+    $result = @{
+        success     = $true
+        status      = $status
+        fqdn        = $fqdn
+        ipAddress   = $p.ip
+        reverseZone = $rz
+        reverseName = $rn
+        aCreated    = $aCreated
+        ptrCreated  = $ptrCreated
+    }
 }
 catch {
-    $code = 1
-    $result = @{success=$false; error=$_.Exception.Message; aCreated=$aCreated; ptrCreated=$ptrCreated}
+    $exitCode = 1
+
+    $result = @{
+        success    = $false
+        error      = $_.Exception.Message
+        aCreated   = $aCreated
+        ptrCreated = $ptrCreated
+    }
 }
+
 [Console]::Out.WriteLine(($result | ConvertTo-Json -Compress))
 [Console]::Out.Flush()
-exit $code
+exit $exitCode
 '@
 
-        $script = $script.Replace('__DATA__', $data)
+        $guestScript = $guestScript.Replace('__DATA__', $encodedParameters)
 
-        # Reducir el texto enviado por Invoke-VMScript.
-        $stream = [IO.MemoryStream]::new()
+        # Comprimir el script para enviarlo mediante VMware Tools.
+        $scriptBytes = [Text.Encoding]::UTF8.GetBytes($guestScript)
+        $memory = [IO.MemoryStream]::new()
+
         try {
             $gzip = [IO.Compression.GZipStream]::new(
-                $stream,
+                $memory,
                 [IO.Compression.CompressionMode]::Compress,
                 $true
             )
+
             try {
-                $bytes = [Text.Encoding]::UTF8.GetBytes($script)
-                $gzip.Write($bytes, 0, $bytes.Length)
+                $gzip.Write($scriptBytes, 0, $scriptBytes.Length)
             }
             finally {
                 $gzip.Dispose()
             }
 
-            $payload = [Convert]::ToBase64String($stream.ToArray())
+            $payload = [Convert]::ToBase64String($memory.ToArray())
         }
         finally {
-            $stream.Dispose()
+            $memory.Dispose()
         }
 
         $launcher = @'
 $m = New-Object IO.MemoryStream
 $b = [Convert]::FromBase64String('__PAYLOAD__')
-$m.Write($b,0,$b.Length)
+$m.Write($b, 0, $b.Length)
 $m.Position = 0
-$g = New-Object IO.Compression.GZipStream($m,[IO.Compression.CompressionMode]::Decompress)
-$r = New-Object IO.StreamReader($g,[Text.Encoding]::UTF8)
-try { $s = $r.ReadToEnd() } finally { $r.Dispose(); $m.Dispose() }
+$g = New-Object IO.Compression.GZipStream($m, [IO.Compression.CompressionMode]::Decompress)
+$r = New-Object IO.StreamReader($g, [Text.Encoding]::UTF8)
+try {
+    $s = $r.ReadToEnd()
+}
+finally {
+    $r.Dispose()
+    $m.Dispose()
+}
 & ([scriptblock]::Create($s))
 '@
+
         $launcher = $launcher.Replace('__PAYLOAD__', $payload)
 
         Set-PowerCLIConfiguration `
@@ -161,39 +308,49 @@ try { $s = $r.ReadToEnd() } finally { $r.Dispose(); $m.Dispose() }
             -NotDefault `
             -ErrorAction Stop
 
+        $executionVmName = ([string]$inputs.executionVmName).Trim()
+
         $vms = @(
-            Get-VM -Server $connection -Name $inputs.executionVmName -ErrorAction Stop |
-                Where-Object { $_.Name -eq $inputs.executionVmName }
+            Get-VM `
+                -Server $connection `
+                -Name $executionVmName `
+                -ErrorAction Stop |
+            Where-Object { $_.Name -eq $executionVmName }
         )
 
         if ($vms.Count -ne 1) {
-            throw "Se esperaba una única VM; encontradas: $($vms.Count)."
+            throw "Se esperaba una sola VM llamada '$executionVmName'; se encontraron $($vms.Count)."
         }
 
-        Write-Host "Ejecutando en: $($vms[0].Name)"
-        Write-Host "Longitud enviada: $($launcher.Length)"
+        Write-Host "Ejecutando creación de A y PTR desde '$executionVmName'."
 
         $execution = Invoke-VMScript `
             -Server $connection `
             -VM $vms[0] `
-            -ScriptType PowerShell `
-            -ScriptText $launcher `
             -GuestUser $inputs.guestUsername `
             -GuestPassword $inputs.guestPassword `
+            -ScriptType PowerShell `
+            -ScriptText $launcher `
             -ToolsWaitSecs 60 `
             -ErrorAction Stop
 
         $output = ([string]$execution.ScriptOutput).Trim()
 
         if ([string]::IsNullOrWhiteSpace($output)) {
-            throw "Código remoto $($execution.ExitCode), sin salida. Verifica el estado de los registros en DNS."
+            throw "La ejecución remota no devolvió resultado. ExitCode: $($execution.ExitCode). Revise el DNS antes de reintentar; no se pudo determinar si hubo cambios."
         }
 
         Write-Host $output
-        $result = $output | ConvertFrom-Json -ErrorAction Stop
+
+        try {
+            $result = $output | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            throw "La ejecución remota devolvió una respuesta que no es JSON válido. Revise el resultado registrado."
+        }
 
         if ($execution.ExitCode -ne 0 -or $result.success -ne $true) {
-            throw "Falló la operación DNS: $output"
+            throw "Error DNS: $($result.error) A creado: $($result.aCreated). PTR creado: $($result.ptrCreated)."
         }
 
         return $output
@@ -201,10 +358,13 @@ try { $s = $r.ReadToEnd() } finally { $r.Dispose(); $m.Dispose() }
     finally {
         if ($null -ne $connection) {
             try {
-                Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction Stop | Out-Null
+                Disconnect-VIServer `
+                    -Server $connection `
+                    -Confirm:$false `
+                    -ErrorAction Stop | Out-Null
             }
             catch {
-                Write-Warning 'No fue posible cerrar la conexión a vCenter.'
+                Write-Warning "No se pudo cerrar la conexión con vCenter: $($_.Exception.Message)"
             }
         }
     }
