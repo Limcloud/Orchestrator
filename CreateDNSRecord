@@ -4,42 +4,49 @@ function Handler($context, $inputs) {
     $stage = 'Validar configuración'
 
     try {
+        # Leer los inputs sin imprimir credenciales.
         $settings = @{
-            vCenter          = $inputs.vCenter
-            vCenterUsername  = $inputs.vCenterUsername
-            vCenterPassword  = $inputs.vCenterPassword
-            executionVmName  = $inputs.executionVmName
-            guestUsername    = $inputs.guestUsername
-            guestPassword    = $inputs.guestPassword
+            vCenter         = $inputs.vCenter
+            vCenterUsername = $inputs.vCenterUsername
+            vCenterPassword = $inputs.vCenterPassword
+            executionVmName = $inputs.executionVmName
+            guestUsername   = $inputs.guestUsername
+            guestPassword   = $inputs.guestPassword
         }
-        
+
         foreach ($name in $settings.Keys) {
             if ([string]::IsNullOrWhiteSpace([string]$settings[$name])) {
-                throw "El input '$name' llegó vacío a la tarea. Revisa su vínculo."
+                throw "El input '$name' llegó vacío a la acción. Revisa su vínculo."
             }
         }
 
+        # Conectar únicamente al vCenter configurado.
         $stage = 'Conectar a vCenter'
         Write-Host "Etapa: $stage"
 
         $connection = Connect-VIServer `
-            -Server $inputs.vCenter `
-            -User $inputs.vCenterUsername `
-            -Password $inputs.vCenterPassword `
+            -Server $settings.vCenter `
+            -User $settings.vCenterUsername `
+            -Password $settings.vCenterPassword `
             -NotDefault `
             -ErrorAction Stop
 
+        # Localizar una única VM con el nombre exacto.
         $stage = 'Localizar VM'
         Write-Host "Etapa: $stage"
 
-        $vmName = [string]$inputs.executionVmName
+        $vmName = [string]$settings.executionVmName
+
         $vms = @(
-            Get-VM -Server $connection -Name $vmName -ErrorAction Stop |
+            Get-VM `
+                -Server $connection `
+                -Name $vmName `
+                -ErrorAction Stop |
                 Where-Object { $_.Name -eq $vmName }
         )
 
         if ($vms.Count -ne 1) {
-            throw "Se esperaba una única VM con nombre '$vmName'; encontradas: $($vms.Count)."
+            throw "Se esperaba una única VM llamada '$vmName'; encontradas: $($vms.Count)."
         }
 
         $vm = $vms[0]
@@ -48,7 +55,8 @@ function Handler($context, $inputs) {
             throw "La VM '$vmName' no está encendida."
         }
 
-        # Este bloque se ejecuta dentro de Windows.
+        # Este script se ejecutará dentro de Windows mediante VMware Tools.
+        # No realiza consultas ni modificaciones en DNS.
         $guestScript = @'
 $ErrorActionPreference = 'Stop'
 $testFile = $null
@@ -57,21 +65,34 @@ try {
     $computerName = $env:COMPUTERNAME
     $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-    $testFile = Join-Path $env:TEMP (
+    $testFile = Join-Path -Path $env:TEMP -ChildPath (
         'vro-execution-test-' + [guid]::NewGuid().ToString() + '.txt'
     )
 
     $expectedContent = 'Prueba de ejecucion remota desde Orchestrator'
 
-    Set-Content -LiteralPath $testFile -Value $expectedContent -Encoding UTF8
+    # Crear el archivo de prueba.
+    Set-Content `
+        -LiteralPath $testFile `
+        -Value $expectedContent `
+        -Encoding UTF8 `
+        -ErrorAction Stop
 
-    $actualContent = Get-Content -LiteralPath $testFile -Raw
+    # Leer y comprobar el contenido.
+    $actualContent = Get-Content `
+        -LiteralPath $testFile `
+        -Raw `
+        -ErrorAction Stop
 
     if ($actualContent.TrimEnd() -ne $expectedContent) {
         throw 'El contenido leído no coincide con el contenido escrito.'
     }
 
-    Remove-Item -LiteralPath $testFile -Force
+    # Eliminar únicamente el archivo generado por esta ejecución.
+    Remove-Item `
+        -LiteralPath $testFile `
+        -Force `
+        -ErrorAction Stop
 
     if (Test-Path -LiteralPath $testFile) {
         throw 'No fue posible eliminar el archivo de prueba.'
@@ -92,8 +113,12 @@ try {
 catch {
     $failureMessage = $_.Exception.Message
 
-    if ($testFile -and (Test-Path -LiteralPath $testFile)) {
-        Remove-Item -LiteralPath $testFile -Force -ErrorAction SilentlyContinue
+    # Intentar limpiar el archivo si la prueba falló.
+    if ($testFile) {
+        Remove-Item `
+            -LiteralPath $testFile `
+            -Force `
+            -ErrorAction SilentlyContinue
     }
 
     [ordered]@{
@@ -114,42 +139,52 @@ catch {
             -VM $vm `
             -ScriptType PowerShell `
             -ScriptText $guestScript `
-            -GuestUser $inputs.guestUsername `
-            -GuestPassword $inputs.guestPassword `
+            -GuestUser $settings.guestUsername `
+            -GuestPassword $settings.guestPassword `
             -ToolsWaitSecs 60 `
             -ErrorAction Stop
 
+        # Comprobar el resultado del proceso dentro de Windows.
         $stage = 'Validar resultado'
+        Write-Host "Etapa: $stage"
+
         $scriptOutput = ([string]$result.ScriptOutput).Trim()
 
         if ($result.ExitCode -ne 0) {
             throw "El script remoto terminó con código $($result.ExitCode). $scriptOutput"
         }
 
-        $parsedResult = $scriptOutput | ConvertFrom-Json -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($scriptOutput)) {
+            throw 'El script remoto no devolvió ningún resultado.'
+        }
+
+        $parsedResult = $scriptOutput |
+            ConvertFrom-Json -ErrorAction Stop
 
         if ($parsedResult.success -ne $true) {
             throw "La prueba remota no reportó éxito. $scriptOutput"
         }
 
-        Write-Host "Prueba completada. Equipo: $($parsedResult.computerName)"
+        Write-Host "Prueba completada correctamente."
+        Write-Host "Equipo: $($parsedResult.computerName)"
         Write-Host "Ejecutado como: $($parsedResult.executedAs)"
         Write-Host "Archivo creado, leído y eliminado correctamente."
 
-        return @{
-            executionResult = $scriptOutput
-        }
+        # La acción tiene Return type: string.
+        return $scriptOutput
     }
     catch {
         throw "Falló la etapa '$stage': $($_.Exception.Message)"
     }
     finally {
+        # Cerrar solamente la conexión abierta por esta acción.
         if ($null -ne $connection) {
             try {
                 Disconnect-VIServer `
                     -Server $connection `
                     -Confirm:$false `
-                    -ErrorAction Stop | Out-Null
+                    -ErrorAction Stop |
+                    Out-Null
             }
             catch {
                 Write-Warning 'No fue posible cerrar la conexión a vCenter.'
