@@ -87,5 +87,28 @@ Get-DnsServerZone `
 
 
 
+=================Scrptable task get ip dns record
+
+
+var resourceNames = inputProperties.get("resourceNames");
+var addresses = inputProperties.get("addresses");
+
+// Obtener nombre de la VM
+vmName = resourceNames[0];
+
+// Obtener primera IP de la VM
+ipAddress = addresses[0][0];
+
+// Validar valores
+if (!vmName || !ipAddress) {
+    throw "VM Name or IP Address not found";
+}
+
+// Logging
+System.log("VM Name: " + vmName);
+System.log("IP Address: " + ipAddress);
+
+
+
 
 
